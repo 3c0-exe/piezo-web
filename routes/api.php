@@ -1,5 +1,15 @@
 <?php
 
+use App\Http\Controllers\Api\DashboardController;
+use App\Http\Controllers\Api\Esp32Controller;
 use Illuminate\Support\Facades\Route;
 
-// ESP32 API routes and dashboard API routes will be added in Phase 2
+// ── ESP32-facing routes (protected by X-ESP-Key header) ──────────────
+Route::middleware('esp.key')->group(function () {
+    Route::post('/data',    [Esp32Controller::class, 'store']);
+    Route::get('/command',  [Esp32Controller::class, 'command']);
+    Route::post('/connect', [Esp32Controller::class, 'connect']);
+});
+
+// ── Dashboard poll route (protected by auth session) ─────────────────
+Route::middleware('auth')->get('/dashboard-data', [DashboardController::class, 'index']);

@@ -1,0 +1,49 @@
+<?php
+
+namespace App\Http\Controllers\Api;
+
+use App\Http\Controllers\Controller;
+use App\Models\EnergyLog;
+use App\Models\SystemSetting;
+use App\Services\AnalyticsService;
+use Illuminate\Http\JsonResponse;
+
+class DashboardController extends Controller
+{
+    public function __construct(protected AnalyticsService $analytics) {}
+
+    /**
+     * GET /api/dashboard-data
+     * Called every 3 seconds by the dashboard frontend.
+     */
+    public function index(): JsonResponse
+    {
+        $settings  = SystemSetting::current()->load('activeStudent');
+        $latestLog = EnergyLog::orderByDesc('logged_at')->first();
+        $analytics = $this->analytics->compute($settings);
+
+        return response()->json([
+            'tracking_on'    => $settings->is_tracking_on,
+            'active_student' => $settings->activeStudent
+                ? [
+                    'id'         => $settings->activeStudent->id,
+                    'name'       => $settings->activeStudent->name,
+                    'student_id' => $settings->activeStudent->student_id,
+                    'section'    => $settings->activeStudent->section,
+                    'year_level' => $settings->activeStudent->year_level,
+                ]
+                : null,
+            'latest_log' => $latestLog
+                ? [
+                    'steps'              => $latestLog->steps,
+                    'watts'              => $latestLog->watts,
+                    'voltage'            => $latestLog->voltage,
+                    'battery_percentage' => $latestLog->battery_percentage,
+                    'battery_health'     => $latestLog->battery_health,
+                    'logged_at'          => $latestLog->logged_at->toISOString(),
+                ]
+                : null,
+            'analytics' => $analytics,
+        ]);
+    }
+}
