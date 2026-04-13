@@ -7,7 +7,7 @@
     @vite(['resources/css/app.css', 'resources/js/app.js'])
     @stack('head')
 </head>
-<body class="h-full bg-gray-950 text-white flex">
+<body class="h-screen bg-gray-950 text-white flex overflow-hidden">
 
     {{-- ── Sidebar ──────────────────────────────────────────────────── --}}
     <aside class="w-64 shrink-0 bg-gray-900 border-r border-gray-800 flex flex-col h-screen sticky top-0">
@@ -99,7 +99,7 @@
     </aside>
 
     {{-- ── Main content ─────────────────────────────────────────────── --}}
-    <div class="flex-1 flex flex-col min-h-screen min-w-0">
+    <div class="flex-1 flex flex-col h-screen overflow-y-auto min-w-0">
 
         {{-- Top bar --}}
         <header class="h-14 shrink-0 bg-gray-900/80 backdrop-blur border-b border-gray-800

@@ -4,12 +4,13 @@ use App\Http\Controllers\Api\DashboardController;
 use App\Http\Controllers\Api\Esp32Controller;
 use Illuminate\Support\Facades\Route;
 
-// ── ESP32-facing routes (protected by X-ESP-Key header) ──────────────
+// ── ESP32-facing routes ───────────────────────────────────────────────
 Route::middleware('esp.key')->group(function () {
     Route::post('/data',    [Esp32Controller::class, 'store']);
     Route::get('/command',  [Esp32Controller::class, 'command']);
     Route::post('/connect', [Esp32Controller::class, 'connect']);
 });
 
-// ── Dashboard poll route (protected by auth session) ─────────────────
-Route::middleware('auth')->get('/dashboard-data', [DashboardController::class, 'index']);
+// ── Dashboard poll route ──────────────────────────────────────────────
+// Uses 'web' middleware so it shares the browser session cookie
+Route::middleware('web')->get('/dashboard-data', [DashboardController::class, 'index']);
