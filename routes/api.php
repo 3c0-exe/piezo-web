@@ -6,8 +6,6 @@ use Illuminate\Support\Facades\Route;
 
 // ── ESP32-facing routes ───────────────────────────────────────────────
 Route::middleware('esp.key')->group(function () {
-    Route::post('/data',    [Esp32Controller::class, 'store']);
-    Route::get('/command',  [Esp32Controller::class, 'command']);
     Route::post('/connect', [Esp32Controller::class, 'connect']);
 });
 

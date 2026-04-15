@@ -7,12 +7,15 @@ use App\Models\EnergyLog;
 use App\Models\EventLog;
 use App\Models\Student;
 use App\Models\SystemSetting;
+use App\Services\MqttService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Http\Request;
 use Illuminate\View\View;
 
 class DashboardController extends Controller
 {
+    public function __construct(protected MqttService $mqtt) {}
+
     public function index(): View
     {
         $settings = SystemSetting::current()->load('activeStudent');
@@ -75,6 +78,12 @@ class DashboardController extends Controller
                 'tracking_started_at' => null,
             ]);
 
+            $this->mqtt->publish('piezo/command', [
+                'tracking_on'  => false,
+                'student_id'   => null,
+                'student_name' => null,
+            ], retain: true);
+
             EventLog::record('tracking_stopped', 'Tracking was stopped by admin.', [
                 'elapsed_seconds' => $elapsed,
             ]);
@@ -97,6 +106,12 @@ class DashboardController extends Controller
                 'started_at' => now(),
             ]);
 
+            $this->mqtt->publish('piezo/command', [
+                'tracking_on'  => true,
+                'student_id'   => $settings->activeStudent->student_id,
+                'student_name' => $settings->activeStudent->name,
+            ], retain: true);
+
             EventLog::record('tracking_started', 'Tracking was started by admin.', [
                 'student_id' => $settings->active_student_id,
             ]);
@@ -113,9 +128,18 @@ class DashboardController extends Controller
 
         $student = Student::findOrFail($request->student_id);
 
-        SystemSetting::current()->update([
+        $settings = SystemSetting::current();
+        $settings->update([
             'active_student_id' => $student->id,
         ]);
+
+        if ($settings->is_tracking_on) {
+            $this->mqtt->publish('piezo/command', [
+                'tracking_on'  => true,
+                'student_id'   => $student->student_id,
+                'student_name' => $student->name,
+            ], retain: true);
+        }
 
         EventLog::record('student_assigned', "Active student set to {$student->name}.", [
             'student_id'   => $student->id,

@@ -2,119 +2,121 @@
 
 namespace App\Console\Commands;
 
+use App\Models\SystemSetting;
+use App\Services\MqttService;
 use Illuminate\Console\Command;
-use Illuminate\Support\Facades\Http;
 
 class SimulatePiezo extends Command
 {
     protected $signature = 'piezo:simulate
-                            {--interval=3  : Seconds between each push}
-                            {--count=0     : Number of pushes (0 = infinite)}
-                            {--url=        : Base URL of the server}';
+                            {--interval=3 : Seconds between each publish}
+                            {--count=0    : Number of publishes (0 = infinite)}';
 
-    protected $description = 'Simulate ESP32 sensor data for testing without hardware';
+    protected $description = 'Simulate ESP32 sensor data — publishes to piezo/data via MQTT';
 
-    public function handle(): int
+    // ── Voltage lookup table (mirrors firmware + backend) ────────────
+    private function voltageToPercent(float $v): int
+    {
+        return match(true) {
+            $v >= 4.15 => 100,
+            $v >= 4.00 => 85,
+            $v >= 3.85 => 70,
+            $v >= 3.70 => 55,
+            $v >= 3.55 => 40,
+            $v >= 3.40 => 25,
+            $v >= 3.20 => 10,
+            default    => 0,
+        };
+    }
+
+    public function handle(MqttService $mqtt): int
     {
         $interval = (int) $this->option('interval');
         $count    = (int) $this->option('count');
-        $baseUrl  = rtrim($this->option('url') ?: config('app.url'), '/');
-        $apiKey   = config('app.esp_api_key');
 
-        $headers = [
-            'X-ESP-Key'    => $apiKey,
-            'Content-Type' => 'application/json',
-            'Accept'       => 'application/json',
-        ];
-
-        $this->info("🔌 Piezo Simulator starting...");
-        $this->info("   Server  : {$baseUrl}");
+        $this->info('🔌 Piezo Simulator starting (MQTT mode)...');
+        $this->info("   Broker  : " . config('mqtt-client.connections.default.host'));
         $this->info("   Interval: {$interval}s");
         $this->info("   Count   : " . ($count === 0 ? '∞ infinite' : $count));
         $this->newLine();
 
-        // ── Boot: POST /api/connect ──────────────────────────────────
-        try {
-            $res = Http::withHeaders($headers)->post("{$baseUrl}/api/connect");
-            $this->info("✅ Connected to server: " . $res->body());
-        } catch (\Exception $e) {
-            $this->error("❌ Could not reach server: " . $e->getMessage());
-            return 1;
-        }
+        // ── Initial simulated state ──────────────────────────────────
+        // Start mid-range so there is room to both rise and fall.
+        $voltage    = 3.70;
 
-        // ── Simulate state ───────────────────────────────────────────
-        $steps      = rand(100, 300);
-        $battery    = round(rand(10, 40) + rand(0, 99) / 100, 2);
-        $voltage    = 3.50;
-        $iteration  = 0;
+        // Charging burst state — controls the true/false alternation pattern.
+        $burstTrueRemaining  = 0;
+        $burstFalseRemaining = 0;
 
-        $this->info("▶  Starting simulation loop. Press Ctrl+C to stop.");
+        $iteration = 0;
+
+        $this->info('▶  Simulation loop running. Press Ctrl+C to stop.');
         $this->newLine();
 
         while (true) {
-            // ── Check /api/command first ─────────────────────────────
-            try {
-                $cmd = Http::withHeaders($headers)->get("{$baseUrl}/api/command");
-                $cmdData = $cmd->json();
+            // ── Check tracking state from DB ─────────────────────────
+            $setting = SystemSetting::current();
 
-                if (! ($cmdData['tracking_on'] ?? false)) {
-                    $this->line("⏸  Tracking is OFF — skipping push. Waiting {$interval}s...");
-                    sleep($interval);
-
-                    $iteration++;
-                    if ($count > 0 && $iteration >= $count) break;
-                    continue;
-                }
-
-                $studentName = $cmdData['active_student']['name'] ?? 'No student';
-                $this->line("👤 Active student: {$studentName}");
-
-            } catch (\Exception $e) {
-                $this->error("❌ Command check failed: " . $e->getMessage());
+            if (! $setting->is_tracking_on) {
+                $this->line("⏸  Tracking is OFF — waiting {$interval}s...");
                 sleep($interval);
                 continue;
             }
 
-            // ── Simulate realistic increments ────────────────────────
-            $steps   += rand(8, 25);
-            $battery  = min(100, round($battery + rand(0, 30) / 100, 2));
-            $voltage  = round(min(4.20, $voltage + rand(-5, 10) / 1000), 4);
-            $watts    = round(rand(20, 80) / 1000, 4); // 0.020 – 0.080 W
+            $studentName = $setting->activeStudent?->name ?? 'Unknown';
 
-            $health = match(true) {
-                $battery >= 60 => 'Good',
-                $battery >= 40 => 'Fair',
-                $battery >= 20 => 'Low',
-                default        => 'Critical',
-            };
+            // ── Determine is_charging for this tick ──────────────────
+            // When both counters are zero, start a new burst cycle.
+            if ($burstTrueRemaining <= 0 && $burstFalseRemaining <= 0) {
+                $burstTrueRemaining  = rand(1, 3);
+                $burstFalseRemaining = rand(4, 10);
+            }
 
+            if ($burstTrueRemaining > 0) {
+                $isCharging = true;
+                $burstTrueRemaining--;
+            } else {
+                $isCharging = false;
+                $burstFalseRemaining--;
+            }
+
+            // ── Simulate voltage ─────────────────────────────────────
+            // Charging ticks nudge voltage up slightly; idle ticks apply
+            // tiny random noise to keep readings lifelike.
+            if ($isCharging) {
+                $voltage += rand(5, 15) / 1000;   // +0.005 – +0.015 V per charge tick
+            } else {
+                $voltage += rand(-3, 3) / 1000;   // ±0.003 V noise at idle
+            }
+
+            // Clamp to realistic battery range.
+            $voltage = round(min(4.20, max(3.00, $voltage)), 2);
+
+            // ── Build payload (mirrors real ESP32 output exactly) ────
             $payload = [
-                'steps'              => $steps,
-                'watts'              => $watts,
-                'voltage'            => $voltage,
-                'battery_percentage' => $battery,
-                'battery_health'     => $health,
+                'voltage'     => $voltage,
+                'is_charging' => $isCharging,
             ];
 
-            // ── POST /api/data ────────────────────────────────────────
+            // ── Publish to piezo/data ────────────────────────────────
             try {
-                $res = Http::withHeaders($headers)->post("{$baseUrl}/api/data", $payload);
+                $mqtt->publish('piezo/data', json_encode($payload), false);
 
                 $iteration++;
+                $pct = $this->voltageToPercent($voltage);
+
                 $this->line(sprintf(
-                    "[%s] #%d | Steps: %d | Watts: %.4f W | Voltage: %.3f V | Battery: %.2f%% (%s) → %s",
+                    '[%s] #%d | 👤 %s | Voltage: %.2f V (%d%%) | Charging: %s',
                     now()->format('H:i:s'),
                     $iteration,
-                    $steps,
-                    $watts,
+                    $studentName,
                     $voltage,
-                    $battery,
-                    $health,
-                    $res->json('status') ?? $res->body()
+                    $pct,
+                    $isCharging ? '⚡ YES' : '— no',
                 ));
 
             } catch (\Exception $e) {
-                $this->error("❌ Data push failed: " . $e->getMessage());
+                $this->error('❌ MQTT publish failed: ' . $e->getMessage());
             }
 
             if ($count > 0 && $iteration >= $count) break;
@@ -123,7 +125,7 @@ class SimulatePiezo extends Command
         }
 
         $this->newLine();
-        $this->info("✅ Simulation complete.");
+        $this->info('✅ Simulation complete.');
         return 0;
     }
 }
