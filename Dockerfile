@@ -13,10 +13,8 @@ COPY . .
 RUN composer install --no-dev --optimize-autoloader
 RUN npm install && npm run build
 
+RUN chmod +x /var/www/start.sh
+
 EXPOSE 8000
 
-CMD printenv | grep -E "^(APP_|DB_|MQTT_|MYSQL_|SESSION_|CACHE_|QUEUE_|ESP_)" > /var/www/.env && \
-    php artisan config:clear && \
-    php artisan migrate --force && \
-    php artisan db:seed --force && \
-    php artisan serve --host=0.0.0.0 --port=8000
+CMD ["/bin/bash", "/var/www/start.sh"]
