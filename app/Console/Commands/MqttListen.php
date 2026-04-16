@@ -33,7 +33,7 @@ class MqttListen extends Command
 
             $voltage    = $payload['voltage']     ?? null;
             $isCharging = $payload['is_charging'] ?? false;
-            $stepCount  = $payload['step_count']  ?? ($isCharging ? 1 : 0); // Default to 1 for backward compatibility
+            $stepCount  = $payload['step_count']  ?? ($isCharging ? 1 : 0);
 
             $this->line(sprintf(
                 '[%s] voltage=%.3f | is_charging=%s | steps=%d',
@@ -43,7 +43,6 @@ class MqttListen extends Command
                 $stepCount
             ));
 
-            // ── Payload processor goes here (Task 2.2) ───────────────
             $this->processPayload($voltage, (bool) $isCharging, (int) $stepCount);
         });
 
@@ -51,9 +50,10 @@ class MqttListen extends Command
     }
 
     // ── State ────────────────────────────────────────────────────────────────
-private int  $nonChargingTick         = 0;
-private int  $lastOvertimeMinuteLogged = 0;
-private bool $lastWasCharging          = false;
+    private int     $nonChargingTick          = 0;
+    private int     $lastOvertimeMinuteLogged  = 0;
+    private bool    $lastWasCharging           = false;
+    private ?string $currentChargingSource     = null;  // ← new
 
     // ── Payload Processor ────────────────────────────────────────────────────
     private function processPayload(?float $voltage, bool $isCharging, int $stepCount): void
@@ -73,7 +73,6 @@ private bool $lastWasCharging          = false;
         $batteryPercentage = $this->deriveBatteryPercentage($voltage);
         $batteryHealth     = $this->deriveBatteryHealth($voltage);
 
-        // ── Current step count ───────────────────────────────────────────────
         $lastLog      = EnergyLog::where('student_id', $studentId)
                             ->orderByDesc('logged_at')
                             ->first();
@@ -81,13 +80,17 @@ private bool $lastWasCharging          = false;
 
         if ($isCharging) {
             // ── Charging tick ────────────────────────────────────────────────
-            $currentSteps += $stepCount; // 0 if USB charging, >0 if stepped
+            $currentSteps += $stepCount;
 
-            // Watts only meaningful when steps are involved
             $baseWatts = $stepCount > 0
                 ? round(0.05 + ($stepCount * 0.03) + mt_rand(0, 80) / 1000, 4)
                 : 0.0;
             $watts = min(0.8, $baseWatts);
+
+            // Lock in source at session start only — don't overwrite mid-session
+            if (! $this->lastWasCharging) {
+                $this->currentChargingSource = $stepCount > 0 ? 'piezo' : 'ac';
+            }
 
             EnergyLog::create([
                 'student_id'         => $studentId,
@@ -97,21 +100,24 @@ private bool $lastWasCharging          = false;
                 'battery_percentage' => $batteryPercentage,
                 'battery_health'     => $batteryHealth,
                 'is_charging'        => true,
+                'charging_source'    => $this->currentChargingSource,  // ← changed
                 'logged_at'          => now(),
             ]);
 
-$this->checkOvertime($settings, $studentId);
+            $this->checkOvertime($settings, $studentId);
             $this->lastWasCharging = true;
 
         } else {
-    $this->nonChargingTick++;
+            // ── Non-charging tick ────────────────────────────────────────────
+            $this->nonChargingTick++;
 
-    $wasCharging = $this->lastWasCharging;
-    $this->lastWasCharging = false;
+            $wasCharging = $this->lastWasCharging;
+            $this->lastWasCharging = false;
+            $this->currentChargingSource = null;  // ← new: reset source on unplug
 
-    if (! $wasCharging && $this->nonChargingTick % 16 !== 1) {
-        return;
-    }
+            if (! $wasCharging && $this->nonChargingTick % 16 !== 1) {
+                return;
+            }
 
             EnergyLog::create([
                 'student_id'         => $studentId,
@@ -121,6 +127,7 @@ $this->checkOvertime($settings, $studentId);
                 'battery_percentage' => $batteryPercentage,
                 'battery_health'     => $batteryHealth,
                 'is_charging'        => false,
+                'charging_source'    => null,
                 'logged_at'          => now(),
             ]);
         }
@@ -140,15 +147,12 @@ $this->checkOvertime($settings, $studentId);
             return;
         }
 
-        // ── Flag the session once on first crossing ──────────────────────────
         if ($elapsedMinutes === 21) {
-            // First minute past the 20-min mark — flag the session
             ChargingSession::where('student_id', $studentId)
                 ->whereNull('ended_at')
                 ->update(['flagged_overtime' => true]);
         }
 
-        // ── Log once per minute while overtime ──────────────────────────────
         if ($elapsedMinutes > $this->lastOvertimeMinuteLogged) {
             $this->lastOvertimeMinuteLogged = $elapsedMinutes;
 
