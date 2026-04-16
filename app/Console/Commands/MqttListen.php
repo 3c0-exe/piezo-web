@@ -83,8 +83,8 @@ class MqttListen extends Command
             $currentSteps += $stepCount; // Add all batched steps from the interrupt
             
             // Scaled watts calculation based on how many steps happened in this 3s window
-            $baseWatts = round(0.5 + ($currentSteps % 7) * 0.3 + mt_rand(0, 400) / 1000, 2);
-            $watts = min(5.0, $baseWatts * (1 + ($stepCount * 0.1))); // Boost for multi-step bursts, capped at 5W
+                $baseWatts = round(0.05 + ($stepCount * 0.03) + mt_rand(0, 80) / 1000, 4);
+                $watts = min(0.8, $baseWatts);
 
             EnergyLog::create([
                 'student_id'         => $studentId,

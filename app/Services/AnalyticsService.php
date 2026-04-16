@@ -24,26 +24,39 @@ class AnalyticsService
         $pace = null;
         $eta  = null;
 
-        // Need at least 2 logs to compute pace
-        $latestTwo = EnergyLog::orderByDesc('logged_at')
-            ->limit(2)
-            ->get();
+if ($settings->is_tracking_on && $settings->active_student_id && $settings->tracking_started_at) {
+$newer = EnergyLog::where('student_id', $settings->active_student_id)
+        ->where('logged_at', '>=', $settings->tracking_started_at)
+        ->orderByDesc('logged_at')
+        ->first();
 
-        if ($latestTwo->count() === 2) {
-            $newer = $latestTwo->first();
-            $older = $latestTwo->last();
+    $older = EnergyLog::where('student_id', $settings->active_student_id)
+        ->where('logged_at', '>=', $settings->tracking_started_at)
+        ->orderBy('logged_at')
+        ->first();
 
-            $batteryDiff = $newer->battery_percentage - $older->battery_percentage;
-            $timeDiff    = abs($newer->logged_at->diffInSeconds($older->logged_at));
+    if ($newer && $older && $newer->id !== $older->id) {
+$batteryDiff  = $newer->battery_percentage - $older->battery_percentage;
+$voltageDiff  = $newer->voltage - $older->voltage;
+$timeDiff     = abs($newer->logged_at->diffInSeconds($older->logged_at));
 
-            // Only compute pace when battery is actually gaining
-            if ($batteryDiff > 0 && $timeDiff > 0) {
-                // Minutes per 1% battery gained
-                $pace = ($timeDiff / 60) / $batteryDiff;
-                $remaining = 100 - $newer->battery_percentage;
-                $eta  = $pace * $remaining; // in minutes
-            }
-        }
+if ($timeDiff > 0 && ($batteryDiff > 0 || $voltageDiff > 0)) {
+    if ($batteryDiff > 0) {
+        $pace = ($timeDiff / 60) / $batteryDiff;
+    } else {
+        // Estimate pace from voltage trend (0.95V total range: 3.20–4.15)
+        $pctPerVolt   = 100 / 0.95;
+        $pctGainedEst = $voltageDiff * $pctPerVolt;
+        $pace = $pctGainedEst > 0 ? ($timeDiff / 60) / $pctGainedEst : null;
+    }
+
+    if ($pace !== null) {
+        $remaining = 100 - $newer->battery_percentage;
+        $eta = $pace * $remaining;
+    }
+}
+    }
+}
 
         return [
             'charging_pace_min_per_pct' => $pace  !== null ? round($pace, 2)  : null,
