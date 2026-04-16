@@ -19,7 +19,20 @@ class DashboardController extends Controller
     public function index(): JsonResponse
     {
         $settings  = SystemSetting::current()->load('activeStudent');
-        $latestLog = EnergyLog::orderByDesc('logged_at')->first();
+        $latestLog = $settings->is_tracking_on && $settings->active_student_id && $settings->tracking_started_at
+            ? EnergyLog::where('student_id', $settings->active_student_id)
+                ->where('logged_at', '>=', $settings->tracking_started_at)
+                ->orderByDesc('logged_at')
+                ->first()
+            : EnergyLog::where('student_id', $settings->active_student_id)
+                ->orderByDesc('logged_at')
+                ->first();
+        $previousLog = $latestLog
+            ? EnergyLog::where('student_id', $settings->active_student_id)
+                ->where('id', '<', $latestLog->id)
+                ->orderByDesc('logged_at')
+                ->first()
+            : null;
         $analytics = $this->analytics->compute($settings);
 
         return response()->json([
@@ -41,6 +54,9 @@ class DashboardController extends Controller
                     'battery_percentage' => $latestLog->battery_percentage,
                     'battery_health'     => $latestLog->battery_health,
                     'is_charging'        => (bool) $latestLog->is_charging,
+                    'charging_source'    => $latestLog->is_charging
+                                            ? ($latestLog->watts > 0 && $previousLog?->is_charging ? 'piezo' : 'ac')
+                                            : null,
                     'logged_at'          => $latestLog->logged_at->toISOString(),
                 ]
                 : null,

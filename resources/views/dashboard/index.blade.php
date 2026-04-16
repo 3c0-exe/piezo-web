@@ -171,7 +171,7 @@
                              bg-green-500/15 text-green-400 border border-green-500/30
                              flex items-center gap-1.5 opacity-0 transition-opacity duration-300">
                     <span class="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse"></span>
-                    Now Charging
+                    <span id="charging-source-label">Now Charging</span>
                 </span>
 
                 {{-- Battery bar --}}
@@ -274,13 +274,17 @@ function updateTimer() {
     // ── Charging signal ─────────────────────────────────────────────
     let chargingPulseTimeout = null;
 
-    function setChargingSignal(isCharging, currentPct) {
-        const arc       = document.getElementById('battery-arc');
-        const pulseArc  = document.getElementById('battery-arc-pulse');
-        const label     = document.getElementById('charging-label');
+    function setChargingSignal(isCharging, currentPct, chargingSource) {
+        const arc         = document.getElementById('battery-arc');
+        const pulseArc    = document.getElementById('battery-arc-pulse');
+        const label       = document.getElementById('charging-label');
+        const sourceLabel = document.getElementById('charging-source-label');
 
         if (isCharging) {
-            // Show "Now Charging" label
+            // Show "Now Charging" label with source
+            sourceLabel.textContent = chargingSource === 'piezo' ? 'Now Charging · Piezoelectric'
+                                    : chargingSource === 'ac'    ? 'Now Charging · AC'
+                                    :                              'Now Charging';
             label.style.opacity = '1';
 
             // Glow on main arc
@@ -385,7 +389,7 @@ function updateTimer() {
                 document.getElementById('val-updated').textContent = ageSec + 's';
 
                 setBattery(log.battery_percentage, log.battery_health);
-                setChargingSignal(log.is_charging ?? false, log.battery_percentage);
+                setChargingSignal(log.is_charging ?? false, log.battery_percentage, log.charging_source ?? null);
             }
 
             // Analytics

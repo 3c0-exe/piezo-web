@@ -51,8 +51,9 @@ class MqttListen extends Command
     }
 
     // ── State ────────────────────────────────────────────────────────────────
-    private int $nonChargingTick        = 0;
-    private int $lastOvertimeMinuteLogged = 0;
+private int  $nonChargingTick         = 0;
+private int  $lastOvertimeMinuteLogged = 0;
+private bool $lastWasCharging          = false;
 
     // ── Payload Processor ────────────────────────────────────────────────────
     private function processPayload(?float $voltage, bool $isCharging, int $stepCount): void
@@ -78,13 +79,15 @@ class MqttListen extends Command
                             ->first();
         $currentSteps = $lastLog ? $lastLog->steps : 0;
 
-        if ($isCharging && $stepCount > 0) {
+        if ($isCharging) {
             // ── Charging tick ────────────────────────────────────────────────
-            $currentSteps += $stepCount; // Add all batched steps from the interrupt
-            
-            // Scaled watts calculation based on how many steps happened in this 3s window
-                $baseWatts = round(0.05 + ($stepCount * 0.03) + mt_rand(0, 80) / 1000, 4);
-                $watts = min(0.8, $baseWatts);
+            $currentSteps += $stepCount; // 0 if USB charging, >0 if stepped
+
+            // Watts only meaningful when steps are involved
+            $baseWatts = $stepCount > 0
+                ? round(0.05 + ($stepCount * 0.03) + mt_rand(0, 80) / 1000, 4)
+                : 0.0;
+            $watts = min(0.8, $baseWatts);
 
             EnergyLog::create([
                 'student_id'         => $studentId,
@@ -97,15 +100,18 @@ class MqttListen extends Command
                 'logged_at'          => now(),
             ]);
 
-            $this->checkOvertime($settings, $studentId);
+$this->checkOvertime($settings, $studentId);
+            $this->lastWasCharging = true;
 
         } else {
-            // ── Non-charging tick — 1-in-16 throttle ────────────────────────
-            $this->nonChargingTick++;
+    $this->nonChargingTick++;
 
-            if ($this->nonChargingTick % 16 !== 1) {
-                return;
-            }
+    $wasCharging = $this->lastWasCharging;
+    $this->lastWasCharging = false;
+
+    if (! $wasCharging && $this->nonChargingTick % 16 !== 1) {
+        return;
+    }
 
             EnergyLog::create([
                 'student_id'         => $studentId,
