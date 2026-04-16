@@ -93,6 +93,7 @@ class MqttListen extends Command
                 'voltage'            => $voltage,
                 'battery_percentage' => $batteryPercentage,
                 'battery_health'     => $batteryHealth,
+                'is_charging'        => true,
                 'logged_at'          => now(),
             ]);
 
@@ -113,6 +114,7 @@ class MqttListen extends Command
                 'voltage'            => $voltage,
                 'battery_percentage' => $batteryPercentage,
                 'battery_health'     => $batteryHealth,
+                'is_charging'        => false,
                 'logged_at'          => now(),
             ]);
         }

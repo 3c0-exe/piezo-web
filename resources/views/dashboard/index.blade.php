@@ -147,12 +147,31 @@
                           font-size="26"
                           font-weight="bold"
                           fill="white">—%</text>
+
+                    {{-- Charging pulse arc (animates fill → real on step) --}}
+                    <path id="battery-arc-pulse"
+                          d="M 20 110 A 80 80 0 0 1 180 110"
+                          fill="none" stroke="#4ade80" stroke-width="16"
+                          stroke-linecap="round"
+                          stroke-dasharray="251.2"
+                          stroke-dashoffset="251.2"
+                          opacity="0"
+                          style="transition: stroke-dashoffset 0.4s ease, opacity 0.3s ease"/>
                 </svg>
 
                 {{-- Health badge --}}
                 <span id="battery-health-badge"
                       class="mt-2 px-3 py-1 rounded-full text-xs font-semibold bg-gray-800 text-gray-400">
                     No Data
+                </span>
+
+                {{-- Now Charging badge --}}
+                <span id="charging-label"
+                      class="mt-2 px-3 py-1 rounded-full text-xs font-semibold
+                             bg-green-500/15 text-green-400 border border-green-500/30
+                             flex items-center gap-1.5 opacity-0 transition-opacity duration-300">
+                    <span class="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse"></span>
+                    Now Charging
                 </span>
 
                 {{-- Battery bar --}}
@@ -252,6 +271,52 @@ function updateTimer() {
     setInterval(updateTimer, 1000);
     updateTimer();
 
+    // ── Charging signal ─────────────────────────────────────────────
+    let chargingPulseTimeout = null;
+
+    function setChargingSignal(isCharging, currentPct) {
+        const arc       = document.getElementById('battery-arc');
+        const pulseArc  = document.getElementById('battery-arc-pulse');
+        const label     = document.getElementById('charging-label');
+
+        if (isCharging) {
+            // Show "Now Charging" label
+            label.style.opacity = '1';
+
+            // Glow on main arc
+            arc.style.filter = 'drop-shadow(0 0 8px currentColor)';
+
+            // Pulse arc: slow fill to 100% then fade out
+            const realOffset = 251.2 - (251.2 * currentPct / 100);
+            pulseArc.style.stroke     = arc.style.stroke;
+            pulseArc.style.opacity    = '0.35';
+            pulseArc.style.transition = 'none';
+
+            // Start from real percentage
+            pulseArc.style.strokeDashoffset = String(realOffset);
+
+            clearTimeout(chargingPulseTimeout);
+            chargingPulseTimeout = setTimeout(() => {
+                // Slowly fill to 100% over 2.5s
+                pulseArc.style.transition       = 'stroke-dashoffset 2.5s ease-in-out, opacity 0.5s ease';
+                pulseArc.style.strokeDashoffset = '0';
+
+                // Fade out near the end
+                chargingPulseTimeout = setTimeout(() => {
+                    pulseArc.style.opacity = '0';
+                }, 2000);
+            }, 30); // brief tick so transition fires
+
+        } else {
+            // Don't interrupt mid-animation — let it complete and fade out naturally
+            // Only clear the label and glow after the fill finishes
+            chargingPulseTimeout = setTimeout(() => {
+                label.style.opacity = '0';
+                arc.style.filter    = 'none';
+            }, 2500);
+        }
+    }
+
     // ── Battery arc helpers ─────────────────────────────────────────
     const ARC_LENGTH = 251.2;
 
@@ -320,6 +385,7 @@ function updateTimer() {
                 document.getElementById('val-updated').textContent = ageSec + 's';
 
                 setBattery(log.battery_percentage, log.battery_health);
+                setChargingSignal(log.is_charging ?? false, log.battery_percentage);
             }
 
             // Analytics

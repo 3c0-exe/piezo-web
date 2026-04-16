@@ -16,6 +16,7 @@ class EnergyLog extends Model
         'voltage',
         'battery_percentage',
         'battery_health',
+        'is_charging',
         'logged_at',
     ];
 
@@ -25,6 +26,7 @@ class EnergyLog extends Model
         'voltage'            => 'float',
         'battery_percentage' => 'float',
         'steps'              => 'integer',
+        'is_charging'        => 'boolean',
     ];
 
     public function student(): BelongsTo

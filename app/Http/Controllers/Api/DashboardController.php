@@ -40,6 +40,7 @@ class DashboardController extends Controller
                     'voltage'            => $latestLog->voltage,
                     'battery_percentage' => $latestLog->battery_percentage,
                     'battery_health'     => $latestLog->battery_health,
+                    'is_charging'        => (bool) $latestLog->is_charging,
                     'logged_at'          => $latestLog->logged_at->toISOString(),
                 ]
                 : null,
