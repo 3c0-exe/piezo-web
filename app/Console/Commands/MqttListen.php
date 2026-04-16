@@ -33,16 +33,18 @@ class MqttListen extends Command
 
             $voltage    = $payload['voltage']     ?? null;
             $isCharging = $payload['is_charging'] ?? false;
+            $stepCount  = $payload['step_count']  ?? ($isCharging ? 1 : 0); // Default to 1 for backward compatibility
 
             $this->line(sprintf(
-                '[%s] voltage=%.3f | is_charging=%s',
+                '[%s] voltage=%.3f | is_charging=%s | steps=%d',
                 now()->format('H:i:s'),
                 $voltage,
-                $isCharging ? 'true' : 'false'
+                $isCharging ? 'true' : 'false',
+                $stepCount
             ));
 
             // ── Payload processor goes here (Task 2.2) ───────────────
-            $this->processPayload($voltage, (bool) $isCharging);
+            $this->processPayload($voltage, (bool) $isCharging, (int) $stepCount);
         });
 
         return 0;
@@ -53,7 +55,7 @@ class MqttListen extends Command
     private int $lastOvertimeMinuteLogged = 0;
 
     // ── Payload Processor ────────────────────────────────────────────────────
-    private function processPayload(?float $voltage, bool $isCharging): void
+    private function processPayload(?float $voltage, bool $isCharging, int $stepCount): void
     {
         $settings = SystemSetting::current();
 
@@ -76,10 +78,13 @@ class MqttListen extends Command
                             ->first();
         $currentSteps = $lastLog ? $lastLog->steps : 0;
 
-        if ($isCharging) {
+        if ($isCharging && $stepCount > 0) {
             // ── Charging tick ────────────────────────────────────────────────
-            $currentSteps++;
-            $watts = round(0.5 + ($currentSteps % 7) * 0.3 + mt_rand(0, 400) / 1000, 2);
+            $currentSteps += $stepCount; // Add all batched steps from the interrupt
+            
+            // Scaled watts calculation based on how many steps happened in this 3s window
+            $baseWatts = round(0.5 + ($currentSteps % 7) * 0.3 + mt_rand(0, 400) / 1000, 2);
+            $watts = min(5.0, $baseWatts * (1 + ($stepCount * 0.1))); // Boost for multi-step bursts, capped at 5W
 
             EnergyLog::create([
                 'student_id'         => $studentId,
