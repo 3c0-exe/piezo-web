@@ -19,4 +19,5 @@ CMD cp /etc/secrets/.env /var/www/.env && \
     php artisan config:clear && \
     php artisan migrate --force && \
     php artisan mqtt:listen & \
+    (while true; do php artisan schedule:run --verbose --no-interaction; sleep 60; done) & \
     php artisan serve --host=0.0.0.0 --port=8000

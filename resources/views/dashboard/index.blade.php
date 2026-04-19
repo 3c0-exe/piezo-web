@@ -69,10 +69,10 @@
     </div>
 
     {{-- ── Row 2: Session Timer + 4 Metric Cards ────────────────────── --}}
-    <div class="grid grid-cols-2 md:grid-cols-5 gap-6">
+    <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-4 sm:gap-6">
 
         {{-- Session Timer --}}
-        <div class="col-span-2 md:col-span-1 bg-gray-900 border border-gray-800 rounded-2xl p-6 flex flex-col justify-between">
+        <div class="col-span-2 sm:col-span-1 md:col-span-1 bg-gray-900 border border-gray-800 rounded-2xl p-6 flex flex-col justify-between">
             <p class="text-xs font-semibold text-gray-500 uppercase tracking-widest mb-2">Session Time</p>
             <div>
                 <p id="session-timer"

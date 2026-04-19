@@ -7,7 +7,7 @@
 <div class="mt-6 space-y-6">
 
     {{-- Header row --}}
-    <div class="flex items-center justify-between">
+    <div class="flex flex-col sm:flex-row sm:items-center justify-between gap-3">
         <div>
             <p class="text-sm text-gray-400">
                 {{ $students->count() }} student{{ $students->count() !== 1 ? 's' : '' }} registered
@@ -15,7 +15,7 @@
         </div>
         <a href="{{ route('students.create') }}"
            class="inline-flex items-center gap-2 px-4 py-2.5 rounded-xl bg-green-500 hover:bg-green-400
-                  text-gray-950 text-sm font-semibold transition">
+                  text-gray-950 text-sm font-semibold transition self-start sm:self-auto">
             <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                 <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 4v16m8-8H4"/>
             </svg>
@@ -36,7 +36,8 @@
                 <p class="text-gray-600 text-sm mt-1">Click "Register Student" to add one.</p>
             </div>
         @else
-            <table class="w-full text-sm">
+            <div class="overflow-x-auto">
+            <table class="w-full text-sm min-w-[600px]">
                 <thead>
                     <tr class="border-b border-gray-800">
                         <th class="text-left px-6 py-3.5 text-xs font-semibold text-gray-500 uppercase tracking-wider">Name</th>
@@ -96,6 +97,7 @@
                     @endforeach
                 </tbody>
             </table>
+            </div>
         @endif
 
     </div>

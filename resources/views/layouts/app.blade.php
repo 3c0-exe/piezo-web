@@ -9,21 +9,36 @@
 </head>
 <body class="h-screen bg-gray-950 text-white flex overflow-hidden">
 
+    {{-- ── Mobile sidebar backdrop ──────────────────────────────────── --}}
+    <div id="sidebar-backdrop"
+         class="fixed inset-0 bg-black/60 z-20 hidden lg:hidden"
+         onclick="closeSidebar()"></div>
+
     {{-- ── Sidebar ──────────────────────────────────────────────────── --}}
-    <aside class="w-64 shrink-0 bg-gray-900 border-r border-gray-800 flex flex-col h-screen sticky top-0">
+    <aside id="sidebar"
+           class="fixed lg:static inset-y-0 left-0 z-30
+                  w-64 shrink-0 bg-gray-900 border-r border-gray-800 flex flex-col h-screen
+                  -translate-x-full lg:translate-x-0 transition-transform duration-300 ease-in-out">
 
         {{-- Brand --}}
         <div class="flex items-center gap-3 px-6 py-5 border-b border-gray-800">
-            <div class="flex items-center justify-center w-9 h-9 rounded-xl bg-green-500/10 border border-green-500/30">
+            <div class="flex items-center justify-center w-9 h-9 rounded-xl bg-green-500/10 border border-green-500/30 shrink-0">
                 <svg class="w-5 h-5 text-green-400" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                     <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
                           d="M13 10V3L4 14h7v7l9-11h-7z" />
                 </svg>
             </div>
-            <div>
+            <div class="flex-1 min-w-0">
                 <p class="text-sm font-bold text-white leading-none">Piezo Dashboard</p>
                 <p class="text-xs text-gray-500 mt-0.5">Energy Monitor</p>
             </div>
+            {{-- Close button (mobile only) --}}
+            <button onclick="closeSidebar()"
+                    class="lg:hidden p-1.5 rounded-lg text-gray-500 hover:text-white hover:bg-gray-800 transition shrink-0">
+                <svg class="w-4 h-4" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+                </svg>
+            </button>
         </div>
 
         {{-- ESP32 connection indicator --}}
@@ -38,6 +53,7 @@
         <nav class="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
 
             <a href="{{ route('dashboard') }}"
+               onclick="closeSidebar()"
                class="flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition
                       {{ request()->routeIs('dashboard') ? 'bg-green-500/10 text-green-400 border border-green-500/20' : 'text-gray-400 hover:bg-gray-800 hover:text-white' }}">
                 <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -48,6 +64,7 @@
             </a>
 
             <a href="{{ route('students.index') }}"
+               onclick="closeSidebar()"
                class="flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition
                       {{ request()->routeIs('students.*') ? 'bg-green-500/10 text-green-400 border border-green-500/20' : 'text-gray-400 hover:bg-gray-800 hover:text-white' }}">
                 <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -58,6 +75,7 @@
             </a>
 
             <a href="{{ route('reports.index') }}"
+               onclick="closeSidebar()"
                class="flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition
                       {{ request()->routeIs('reports.*') ? 'bg-green-500/10 text-green-400 border border-green-500/20' : 'text-gray-400 hover:bg-gray-800 hover:text-white' }}">
                 <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -103,13 +121,20 @@
 
         {{-- Top bar --}}
         <header class="h-14 shrink-0 bg-gray-900/80 backdrop-blur border-b border-gray-800
-                        flex items-center justify-between px-6 sticky top-0 z-10">
-            <h1 class="text-sm font-semibold text-white">@yield('page-title', 'Dashboard')</h1>
-            <span class="text-xs text-gray-500">{{ now()->format('l, F j Y') }}</span>
+                        flex items-center gap-3 px-4 sm:px-6 sticky top-0 z-10">
+            {{-- Hamburger (mobile only) --}}
+            <button onclick="openSidebar()"
+                    class="lg:hidden p-1.5 rounded-lg text-gray-400 hover:text-white hover:bg-gray-800 transition shrink-0">
+                <svg class="w-5 h-5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16"/>
+                </svg>
+            </button>
+            <h1 class="text-sm font-semibold text-white flex-1 truncate">@yield('page-title', 'Dashboard')</h1>
+            <span class="text-xs text-gray-500 shrink-0 hidden sm:block">{{ now()->format('l, F j Y') }}</span>
         </header>
 
         {{-- Flash messages --}}
-        <div class="px-6 pt-4">
+        <div class="px-4 sm:px-6 pt-4">
             @if (session('success'))
                 <div class="mb-4 p-3 rounded-lg bg-green-500/10 border border-green-500/30 text-green-400 text-sm">
                     {{ session('success') }}
@@ -123,11 +148,23 @@
         </div>
 
         {{-- Page content --}}
-        <main class="flex-1 px-6 pb-8">
+        <main class="flex-1 px-4 sm:px-6 pb-8">
             @yield('content')
         </main>
 
     </div>
+
+    {{-- ── Sidebar toggle script ─────────────────────────────────────── --}}
+    <script>
+        function openSidebar() {
+            document.getElementById('sidebar').classList.remove('-translate-x-full');
+            document.getElementById('sidebar-backdrop').classList.remove('hidden');
+        }
+        function closeSidebar() {
+            document.getElementById('sidebar').classList.add('-translate-x-full');
+            document.getElementById('sidebar-backdrop').classList.add('hidden');
+        }
+    </script>
 
     {{-- ── ESP32 connection dot script ──────────────────────────────── --}}
     <script>
