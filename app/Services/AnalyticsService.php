@@ -11,21 +11,25 @@ class AnalyticsService
      * Compute all analytics for the dashboard poll.
      * Returns an array with pace, eta, session_elapsed, is_overtime.
      */
-    public function compute(SystemSetting $settings): array
-    {
-        $elapsed  = null;
-        $overtime = false;
+public function compute(SystemSetting $settings, ?\App\Models\ChargingSession $activeSession = null): array
+{
+    $elapsed  = null;
+    $overtime = false;
 
-        if ($settings->is_tracking_on && $settings->tracking_started_at) {
-            $elapsed  = now()->diffInSeconds($settings->tracking_started_at);
-            $overtime = $elapsed > 1200;
-        }
+    if ($activeSession) {
+        $elapsed  = now()->diffInSeconds($activeSession->started_at);
+        $overtime = $elapsed > 1200;
+    }
 
-        $pace = null;
-        $eta  = null;
-        $lastKnownPace = null;
+    $pace = null;
+    $eta  = null;
+    $lastKnownPace = null;
 
-        if ($settings->is_tracking_on && $settings->active_student_email && $settings->tracking_started_at) {
+    if ($activeSession) {
+        $settings->active_student_email = $activeSession->student_email;
+        $settings->tracking_started_at  = $activeSession->started_at;
+
+        if ($activeSession->student_email && $activeSession->started_at) {
 
             $newer = EnergyLog::where('student_email', $settings->active_student_email)
                 ->where('logged_at', '>=', $settings->tracking_started_at)

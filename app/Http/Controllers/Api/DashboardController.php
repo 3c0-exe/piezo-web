@@ -29,10 +29,10 @@ class DashboardController extends Controller
                 ->first();
         }
 
-        $analytics = $this->analytics->compute($settings);
+        $analytics = $this->analytics->compute($settings, $activeSession);
 
-        return response()->json([
-            'tracking_on'    => $settings->is_tracking_on,
+return response()->json([
+    'tracking_on'    => $activeSession !== null,
             'active_student' => $activeSession
                 ? [
                     'name'  => $activeSession->student_name,
