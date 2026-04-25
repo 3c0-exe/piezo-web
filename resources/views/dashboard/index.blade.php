@@ -349,19 +349,20 @@
 
         if (activeStudent) {
             const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
-            card.innerHTML = `
-                <p class="text-sm font-semibold text-white">${activeStudent.name}</p>
-                <p class="text-xs text-gray-500 mt-1">${activeStudent.email}</p>
-                <form method="POST" action="/dashboard/stop" class="mt-4">
-                    <input type="hidden" name="_token" value="${csrfToken}">
-                    <button type="submit"
-                            onclick="return confirm('Force stop this session?')"
-                            class="px-4 py-2 rounded-xl text-xs font-semibold bg-red-500/10 text-red-400
-                                   border border-red-500/30 hover:bg-red-500/20 transition">
-                        Force Stop Session
-                    </button>
-                </form>
-            `;
+card.innerHTML = `
+    <p class="text-sm font-semibold text-white">${activeStudent.name}</p>
+    <p class="text-xs text-gray-500 mt-1">${activeStudent.email}</p>
+    <p class="text-xs text-gray-600 mt-1">Started: <span class="text-gray-400">${activeStudent.started_at ?? ''}</span></p>
+    <form method="POST" action="/dashboard/stop" class="mt-4">
+        <input type="hidden" name="_token" value="${csrfToken}">
+        <button type="submit"
+                onclick="return confirm('Force stop this session?')"
+                class="px-4 py-2 rounded-xl text-xs font-semibold bg-red-500/10 text-red-400
+                       border border-red-500/30 hover:bg-red-500/20 transition">
+            Force Stop Session
+        </button>
+    </form>
+`;
         } else {
             card.innerHTML = `<p class="text-sm text-gray-600 italic">No active session — waiting for QR scan.</p>`;
         }

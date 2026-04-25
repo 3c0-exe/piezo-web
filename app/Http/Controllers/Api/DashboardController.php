@@ -33,12 +33,13 @@ class DashboardController extends Controller
 
 return response()->json([
     'tracking_on'    => $activeSession !== null,
-            'active_student' => $activeSession
-                ? [
-                    'name'  => $activeSession->student_name,
-                    'email' => $activeSession->student_email,
-                ]
-                : null,
+'active_student' => $activeSession
+    ? [
+        'name'       => $activeSession->student_name,
+        'email'      => $activeSession->student_email,
+        'started_at' => $activeSession->started_at->format('h:i A'),
+    ]
+    : null,
             'latest_log' => $latestLog
                 ? [
                     'steps'              => $latestLog->steps,
