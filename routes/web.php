@@ -37,3 +37,10 @@ Route::middleware('auth')->group(function () {
     Route::get('/reports/export/events',   [ReportsController::class, 'exportEvents'])->name('reports.export.events');
 
 });
+
+Route::get('/debug-session', function () {
+    return response()->json([
+        'settings' => App\Models\SystemSetting::current()->toArray(),
+        'latest_session' => App\Models\ChargingSession::latest()->first()?->toArray(),
+    ]);
+});
