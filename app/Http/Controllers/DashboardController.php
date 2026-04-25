@@ -68,10 +68,7 @@ public function stopSession(): RedirectResponse
             'student_name' => '',
         ], retain: true);
 
-        EventLog::record('session_stopped', 'Session manually stopped by admin.', [
-            'student_email'   => $activeSession->student_email,
-            'elapsed_seconds' => $elapsed,
-        ]);
+return back()->with('success', 'Session stopped successfully.');
 
         return back()->with('success', 'Session stopped successfully.');
 
