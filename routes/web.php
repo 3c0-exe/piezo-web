@@ -10,7 +10,6 @@ use Illuminate\Support\Facades\Route;
 Route::middleware('guest')->group(function () {
     Route::get('/login',  [LoginController::class, 'showForm'])->name('login');
     Route::post('/login', [LoginController::class, 'login']);
-    Route::post('/dashboard/stop', [DashboardController::class, 'stopSession'])->name('dashboard.stop');
 });
 
 Route::post('/logout', [LoginController::class, 'logout'])
@@ -25,6 +24,8 @@ Route::get('/scan/success',      [GoogleController::class, 'success'])->name('qr
 
 // ── Authenticated routes ──────────────────────────────────────────────
 Route::middleware('auth')->group(function () {
+
+    Route::post('/dashboard/stop', [DashboardController::class, 'stopSession'])->name('dashboard.stop');
 
     Route::get('/', fn () => redirect()->route('dashboard'));
 
