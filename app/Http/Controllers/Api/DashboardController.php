@@ -13,10 +13,6 @@ class DashboardController extends Controller
 {
     public function __construct(protected AnalyticsService $analytics) {}
 
-    /**
-     * GET /api/dashboard-data
-     * Called every 3 seconds by the dashboard frontend.
-     */
     public function index(): JsonResponse
     {
         $settings      = SystemSetting::current();
@@ -24,14 +20,14 @@ class DashboardController extends Controller
             ->latest('started_at')
             ->first();
 
-        $latestLog = $settings->is_tracking_on && $settings->active_student_email && $settings->tracking_started_at
-            ? EnergyLog::where('student_email', $settings->active_student_email)
-                ->where('logged_at', '>=', $settings->tracking_started_at)
-                ->orderByDesc('logged_at')
-                ->first()
-            : EnergyLog::where('student_email', $settings->active_student_email)
+        $latestLog = null;
+
+        if ($activeSession) {
+            $latestLog = EnergyLog::where('student_email', $activeSession->student_email)
+                ->where('logged_at', '>=', $activeSession->started_at)
                 ->orderByDesc('logged_at')
                 ->first();
+        }
 
         $analytics = $this->analytics->compute($settings);
 
