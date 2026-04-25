@@ -3,20 +3,21 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class ChargingSession extends Model
 {
+    public $timestamps = false;
+
     protected $fillable = [
-        'student_id',
+        'student_name',
+        'student_email',
         'started_at',
         'ended_at',
-        'duration_seconds',
         'total_steps',
         'peak_watts',
+        'peak_voltage',
         'battery_start',
         'battery_end',
-        'capacity_added',
         'flagged_overtime',
     ];
 
@@ -24,32 +25,33 @@ class ChargingSession extends Model
         'started_at'       => 'datetime',
         'ended_at'         => 'datetime',
         'peak_watts'       => 'float',
+        'peak_voltage'     => 'float',
         'battery_start'    => 'float',
         'battery_end'      => 'float',
-        'capacity_added'   => 'float',
         'flagged_overtime' => 'boolean',
-        'duration_seconds' => 'integer',
         'total_steps'      => 'integer',
     ];
 
-    public function student(): BelongsTo
+    // ── Is the session still active? ─────────────────────────────────
+    public function isActive(): bool
     {
-        return $this->belongsTo(Student::class);
+        return is_null($this->ended_at);
     }
 
-    /**
-     * Returns a human-readable duration string e.g. "12m 34s"
-     */
+    // ── Duration in seconds ───────────────────────────────────────────
+    public function durationSeconds(): int
+    {
+        $end = $this->ended_at ?? now();
+        return (int) $this->started_at->diffInSeconds($end);
+    }
+
+    // ── Human readable duration ───────────────────────────────────────
     public function durationFormatted(): string
     {
-        $seconds = $this->duration_seconds ?? 0;
+        $seconds = $this->durationSeconds();
         $minutes = intdiv($seconds, 60);
         $secs    = $seconds % 60;
 
-        if ($minutes > 0) {
-            return "{$minutes}m {$secs}s";
-        }
-
-        return "{$secs}s";
+        return $minutes > 0 ? "{$minutes}m {$secs}s" : "{$secs}s";
     }
 }

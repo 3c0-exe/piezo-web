@@ -49,13 +49,13 @@ class MqttListen extends Command
         return 0;
     }
 
-    // ── State ────────────────────────────────────────────────────────────────
-    private int     $nonChargingTick          = 0;
-    private int     $lastOvertimeMinuteLogged  = 0;
-    private bool    $lastWasCharging           = false;
-    private ?string $currentChargingSource     = null;  // ← new
+    // ── State ─────────────────────────────────────────────────────────
+    private int  $nonChargingTick         = 0;
+    private int  $lastOvertimeMinuteLogged = 0;
+    private bool $lastWasCharging          = false;
+    private ?string $currentChargingSource = null;
 
-    // ── Payload Processor ────────────────────────────────────────────────────
+    // ── Payload Processor ─────────────────────────────────────────────
     private function processPayload(?float $voltage, bool $isCharging, int $stepCount): void
     {
         $settings = SystemSetting::current();
@@ -69,17 +69,34 @@ class MqttListen extends Command
             return;
         }
 
-        $studentId         = $settings->active_student_id;
+        $studentEmail      = $settings->active_student_email;
+        $studentName       = $settings->active_student_name;
         $batteryPercentage = $this->deriveBatteryPercentage($voltage);
         $batteryHealth     = $this->deriveBatteryHealth($voltage);
 
-        $lastLog      = EnergyLog::where('student_id', $studentId)
-                            ->orderByDesc('logged_at')
-                            ->first();
+        // ── Find active session ───────────────────────────────────────
+        $session = ChargingSession::where('student_email', $studentEmail)
+            ->whereNull('ended_at')
+            ->latest('started_at')
+            ->first();
+
+        if (! $session) {
+            $this->warn('[' . now()->format('H:i:s') . '] ⚠ No active session found — skipping.');
+            return;
+        }
+
+        // ── Set battery_start on first log ────────────────────────────
+        if ($session->battery_start === null) {
+            $session->update(['battery_start' => $batteryPercentage]);
+        }
+
+        $lastLog      = EnergyLog::where('student_email', $studentEmail)
+            ->orderByDesc('logged_at')
+            ->first();
         $currentSteps = $lastLog ? $lastLog->steps : 0;
 
         if ($isCharging) {
-            // ── Charging tick ────────────────────────────────────────────────
+            // ── Charging tick ─────────────────────────────────────────
             $currentSteps += $stepCount;
 
             $baseWatts = $stepCount > 0
@@ -87,40 +104,46 @@ class MqttListen extends Command
                 : 0.0;
             $watts = min(0.8, $baseWatts);
 
-            // Lock in source at session start only — don't overwrite mid-session
             if (! $this->lastWasCharging) {
                 $this->currentChargingSource = $stepCount > 0 ? 'piezo' : 'ac';
             }
 
             EnergyLog::create([
-                'student_id'         => $studentId,
+                'student_email'      => $studentEmail,
+                'student_name'       => $studentName,
                 'steps'              => $currentSteps,
                 'watts'              => $watts,
                 'voltage'            => $voltage,
                 'battery_percentage' => $batteryPercentage,
                 'battery_health'     => $batteryHealth,
                 'is_charging'        => true,
-                'charging_source'    => $this->currentChargingSource,  // ← changed
+                'charging_source'    => $this->currentChargingSource,
                 'logged_at'          => now(),
             ]);
 
-            $this->checkOvertime($settings, $studentId);
+            // ── Update peak watts on session ──────────────────────────
+            if ($watts > ($session->peak_watts ?? 0)) {
+                $session->update(['peak_watts' => $watts]);
+            }
+
+            $this->checkOvertime($settings, $session);
             $this->lastWasCharging = true;
 
         } else {
-            // ── Non-charging tick ────────────────────────────────────────────
+            // ── Non-charging tick ─────────────────────────────────────
             $this->nonChargingTick++;
 
             $wasCharging = $this->lastWasCharging;
-            $this->lastWasCharging = false;
-            $this->currentChargingSource = null;  // ← new: reset source on unplug
+            $this->lastWasCharging         = false;
+            $this->currentChargingSource   = null;
 
             if (! $wasCharging && $this->nonChargingTick % 16 !== 1) {
                 return;
             }
 
             EnergyLog::create([
-                'student_id'         => $studentId,
+                'student_email'      => $studentEmail,
+                'student_name'       => $studentName,
                 'steps'              => $currentSteps,
                 'watts'              => 0,
                 'voltage'            => $voltage,
@@ -133,8 +156,8 @@ class MqttListen extends Command
         }
     }
 
-    // ── Overtime Check ───────────────────────────────────────────────────────
-    private function checkOvertime(SystemSetting $settings, ?int $studentId): void
+    // ── Overtime Check ────────────────────────────────────────────────
+    private function checkOvertime(SystemSetting $settings, ChargingSession $session): void
     {
         if (! $settings->tracking_started_at) {
             return;
@@ -148,9 +171,7 @@ class MqttListen extends Command
         }
 
         if ($elapsedMinutes === 21) {
-            ChargingSession::where('student_id', $studentId)
-                ->whereNull('ended_at')
-                ->update(['flagged_overtime' => true]);
+            $session->update(['flagged_overtime' => true]);
         }
 
         if ($elapsedMinutes > $this->lastOvertimeMinuteLogged) {
@@ -159,29 +180,29 @@ class MqttListen extends Command
             EventLog::record(
                 'session_overtime',
                 "Session is overtime at {$elapsedMinutes} minutes.",
-                ['elapsed_seconds' => $elapsed, 'student_id' => $studentId]
+                ['elapsed_seconds' => $elapsed, 'student_email' => $session->student_email]
             );
 
             $this->warn('[' . now()->format('H:i:s') . "] ⚠ OVERTIME — {$elapsedMinutes} min elapsed.");
         }
     }
 
-    // ── Voltage Lookup Table ─────────────────────────────────────────────────
+    // ── Voltage Lookup Table ──────────────────────────────────────────
     private function deriveBatteryPercentage(float $voltage): int
     {
         return match(true) {
             $voltage >= 4.15 => 100,
-            $voltage >= 4.00 => 85,
-            $voltage >= 3.85 => 70,
-            $voltage >= 3.70 => 55,
-            $voltage >= 3.55 => 40,
-            $voltage >= 3.40 => 25,
-            $voltage >= 3.20 => 10,
-            default          => 0,
+            $voltage >= 4.00 =>  85,
+            $voltage >= 3.85 =>  70,
+            $voltage >= 3.70 =>  55,
+            $voltage >= 3.55 =>  40,
+            $voltage >= 3.40 =>  25,
+            $voltage >= 3.20 =>  10,
+            default          =>   0,
         };
     }
 
-    // ── Health Lookup Table ──────────────────────────────────────────────────
+    // ── Health Lookup Table ───────────────────────────────────────────
     private function deriveBatteryHealth(float $voltage): string
     {
         return match(true) {

@@ -6,12 +6,12 @@
 @section('content')
 <div class="mt-6 space-y-6" id="dashboard-root">
 
-    {{-- ── Row 1: Toggle + Student Picker ──────────────────────────── --}}
+    {{-- ── Row 1: Session Status + Active Student ──────────────────────── --}}
     <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
 
-        {{-- System Toggle --}}
+        {{-- Tracking Status --}}
         <div class="bg-gray-900 border border-gray-800 rounded-2xl p-6">
-            <p class="text-xs font-semibold text-gray-500 uppercase tracking-widest mb-4">System Control</p>
+            <p class="text-xs font-semibold text-gray-500 uppercase tracking-widest mb-4">System Status</p>
             <div class="flex items-center justify-between">
                 <div>
                     <p class="text-sm font-medium text-gray-300 mb-1">Tracking Status</p>
@@ -23,52 +23,28 @@
                         {{ $settings->is_tracking_on ? 'TRACKING ON' : 'TRACKING OFF' }}
                     </span>
                 </div>
-                <form method="POST" action="{{ route('dashboard.toggle') }}">
-                    @csrf
-                    <button type="submit"
-                            class="px-5 py-2.5 rounded-xl text-sm font-semibold transition
-                                   {{ $settings->is_tracking_on
-                                       ? 'bg-red-500/10 border border-red-500/30 text-red-400 hover:bg-red-500/20'
-                                       : 'bg-green-500 text-gray-950 hover:bg-green-400' }}">
-                        {{ $settings->is_tracking_on ? 'Stop Tracking' : 'Start Tracking' }}
-                    </button>
-                </form>
+                {{-- No button — fully automatic now --}}
+                <div class="text-xs text-gray-600 italic">Auto · QR controlled</div>
             </div>
         </div>
 
-        {{-- Active Student Picker --}}
+        {{-- Active Student --}}
         <div class="bg-gray-900 border border-gray-800 rounded-2xl p-6">
-            <p class="text-xs font-semibold text-gray-500 uppercase tracking-widest mb-4">Active Student</p>
-            <form method="POST" action="{{ route('dashboard.active-student') }}" class="flex gap-3">
-                @csrf
-                <select name="student_id"
-                        class="flex-1 px-3 py-2.5 rounded-xl bg-gray-800 border border-gray-700 text-white text-sm
-                               focus:outline-none focus:ring-2 focus:ring-green-500">
-                    <option value="">— Select student —</option>
-                    @foreach ($students as $student)
-                        <option value="{{ $student->id }}"
-                                {{ $settings->active_student_id == $student->id ? 'selected' : '' }}>
-                            {{ $student->name }} ({{ $student->student_id }})
-                        </option>
-                    @endforeach
-                </select>
-                <button type="submit"
-                        class="px-4 py-2.5 rounded-xl bg-green-500 hover:bg-green-400 text-gray-950
-                               text-sm font-semibold transition shrink-0">
-                    Set
-                </button>
-            </form>
-            @if ($settings->activeStudent)
-                <p class="text-xs text-gray-500 mt-2">
-                    Current: <span class="text-green-400">{{ $settings->activeStudent->name }}</span>
-                    — {{ $settings->activeStudent->section }}, {{ $settings->activeStudent->year_level }}
+            <p class="text-xs font-semibold text-gray-500 uppercase tracking-widest mb-4">Currently Charging</p>
+            @if ($activeSession)
+                <p class="text-sm font-semibold text-white">{{ $activeSession->student_name }}</p>
+                <p class="text-xs text-gray-500 mt-1">{{ $activeSession->student_email }}</p>
+                <p class="text-xs text-gray-600 mt-1">
+                    Started: <span class="text-gray-400">{{ $activeSession->started_at->format('h:i A') }}</span>
                 </p>
+            @else
+                <p class="text-sm text-gray-600 italic">No active session — waiting for QR scan.</p>
             @endif
         </div>
 
     </div>
 
-    {{-- ── Row 2: Session Timer + 4 Metric Cards ────────────────────── --}}
+    {{-- ── Row 2: Session Timer + 4 Metric Cards ────────────────────────── --}}
     <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-4 sm:gap-6">
 
         {{-- Session Timer --}}
@@ -117,7 +93,7 @@
 
     </div>
 
-    {{-- ── Row 3: Battery Gauge + Analytics ─────────────────────────── --}}
+    {{-- ── Row 3: Battery Gauge + Analytics ─────────────────────────────── --}}
     <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
 
         {{-- Battery SVG Arc Gauge --}}
@@ -125,13 +101,10 @@
             <p class="text-xs font-semibold text-gray-500 uppercase tracking-widest mb-4">Battery Level</p>
 
             <div class="flex flex-col items-center">
-                {{-- SVG Arc --}}
                 <svg viewBox="0 0 200 120" class="w-56 h-auto" xmlns="http://www.w3.org/2000/svg">
-                    {{-- Background arc --}}
                     <path d="M 20 110 A 80 80 0 0 1 180 110"
                           fill="none" stroke="#1f2937" stroke-width="16"
                           stroke-linecap="round"/>
-                    {{-- Foreground arc --}}
                     <path id="battery-arc"
                           d="M 20 110 A 80 80 0 0 1 180 110"
                           fill="none" stroke="#4ade80" stroke-width="16"
@@ -139,7 +112,6 @@
                           stroke-dasharray="251.2"
                           stroke-dashoffset="251.2"
                           style="transition: stroke-dashoffset 0.8s ease, stroke 0.4s ease"/>
-                    {{-- Percentage text --}}
                     <text id="battery-pct-text"
                           x="100" y="95"
                           text-anchor="middle"
@@ -147,8 +119,6 @@
                           font-size="26"
                           font-weight="bold"
                           fill="white">—%</text>
-
-                    {{-- Charging pulse arc (animates fill → real on step) --}}
                     <path id="battery-arc-pulse"
                           d="M 20 110 A 80 80 0 0 1 180 110"
                           fill="none" stroke="#4ade80" stroke-width="16"
@@ -159,13 +129,11 @@
                           style="transition: stroke-dashoffset 0.4s ease, opacity 0.3s ease"/>
                 </svg>
 
-                {{-- Health badge --}}
                 <span id="battery-health-badge"
                       class="mt-2 px-3 py-1 rounded-full text-xs font-semibold bg-gray-800 text-gray-400">
                     No Data
                 </span>
 
-                {{-- Now Charging badge --}}
                 <span id="charging-label"
                       class="mt-2 px-3 py-1 rounded-full text-xs font-semibold
                              bg-green-500/15 text-green-400 border border-green-500/30
@@ -174,7 +142,6 @@
                     <span id="charging-source-label">Now Charging</span>
                 </span>
 
-                {{-- Battery bar --}}
                 <div class="w-full mt-4">
                     <div class="h-2 rounded-full bg-gray-800 overflow-hidden">
                         <div id="battery-bar"
@@ -215,7 +182,10 @@
                         <p class="text-sm text-gray-300 font-medium">Charging For</p>
                         <p class="text-xs text-gray-600">active student</p>
                     </div>
-                    <p id="val-student" class="font-mono text-sm font-bold text-green-400 text-right max-w-32 truncate">—</p>
+                    <div class="text-right max-w-40">
+                        <p id="val-student" class="font-mono text-sm font-bold text-green-400 truncate">—</p>
+                        <p id="val-student-email" class="text-xs text-gray-600 truncate">—</p>
+                    </div>
                 </div>
 
             </div>
@@ -230,9 +200,8 @@
 <script>
 (function () {
 
-    // ── Tracking state from server (initial page load) ─────────────
-    let isTracking   = {{ $settings->is_tracking_on ? 'true' : 'false' }};
-    let startedAt    = {{ $settings->is_tracking_on && $settings->tracking_started_at
+    let isTracking = {{ $settings->is_tracking_on ? 'true' : 'false' }};
+    let startedAt  = {{ $settings->is_tracking_on && $settings->tracking_started_at
                             ? $settings->tracking_started_at->timestamp * 1000
                             : 'null' }};
 
@@ -240,9 +209,9 @@
     const timerEl    = document.getElementById('session-timer');
     const overtimeEl = document.getElementById('overtime-label');
 
-function updateTimer() {
+    function updateTimer() {
         if (! isTracking || ! startedAt) {
-            timerEl.textContent    = '00:00';
+            timerEl.textContent = '00:00';
             timerEl.classList.remove('text-red-400');
             timerEl.classList.add('text-white');
             overtimeEl.textContent = '20:00 limit';
@@ -281,39 +250,28 @@ function updateTimer() {
         const sourceLabel = document.getElementById('charging-source-label');
 
         if (isCharging) {
-            // Show "Now Charging" label with source
             sourceLabel.textContent = chargingSource === 'piezo' ? 'Now Charging · Piezoelectric'
                                     : chargingSource === 'ac'    ? 'Now Charging · AC'
                                     :                              'Now Charging';
             label.style.opacity = '1';
+            arc.style.filter    = 'drop-shadow(0 0 8px currentColor)';
 
-            // Glow on main arc
-            arc.style.filter = 'drop-shadow(0 0 8px currentColor)';
-
-            // Pulse arc: slow fill to 100% then fade out
             const realOffset = 251.2 - (251.2 * currentPct / 100);
             pulseArc.style.stroke     = arc.style.stroke;
             pulseArc.style.opacity    = '0.35';
             pulseArc.style.transition = 'none';
-
-            // Start from real percentage
             pulseArc.style.strokeDashoffset = String(realOffset);
 
             clearTimeout(chargingPulseTimeout);
             chargingPulseTimeout = setTimeout(() => {
-                // Slowly fill to 100% over 2.5s
                 pulseArc.style.transition       = 'stroke-dashoffset 2.5s ease-in-out, opacity 0.5s ease';
                 pulseArc.style.strokeDashoffset = '0';
-
-                // Fade out near the end
                 chargingPulseTimeout = setTimeout(() => {
                     pulseArc.style.opacity = '0';
                 }, 2000);
-            }, 30); // brief tick so transition fires
+            }, 30);
 
         } else {
-            // Don't interrupt mid-animation — let it complete and fade out naturally
-            // Only clear the label and glow after the fill finishes
             chargingPulseTimeout = setTimeout(() => {
                 label.style.opacity = '0';
                 arc.style.filter    = 'none';
@@ -325,15 +283,14 @@ function updateTimer() {
     const ARC_LENGTH = 251.2;
 
     function setBattery(pct, health) {
-        const arc     = document.getElementById('battery-arc');
-        const text    = document.getElementById('battery-pct-text');
-        const bar     = document.getElementById('battery-bar');
-        const badge   = document.getElementById('battery-health-badge');
+        const arc   = document.getElementById('battery-arc');
+        const text  = document.getElementById('battery-pct-text');
+        const bar   = document.getElementById('battery-bar');
+        const badge = document.getElementById('battery-health-badge');
 
-        const offset  = ARC_LENGTH - (ARC_LENGTH * pct / 100);
+        const offset = ARC_LENGTH - (ARC_LENGTH * pct / 100);
         arc.style.strokeDashoffset = offset;
 
-        // Color by health
         const colors = {
             Good:     '#4ade80',
             Fair:     '#facc15',
@@ -348,14 +305,13 @@ function updateTimer() {
         };
 
         const color = colors[health] ?? '#4ade80';
-        arc.style.stroke  = color;
-        bar.style.width   = pct + '%';
+        arc.style.stroke        = color;
+        bar.style.width         = pct + '%';
         bar.style.backgroundColor = color;
-
-        text.textContent  = pct.toFixed(1) + '%';
-        badge.textContent = health ?? 'Unknown';
-        badge.className   = 'mt-2 px-3 py-1 rounded-full text-xs font-semibold '
-                            + (badgeClasses[health] ?? 'bg-gray-800 text-gray-400');
+        text.textContent        = pct.toFixed(1) + '%';
+        badge.textContent       = health ?? 'Unknown';
+        badge.className         = 'mt-2 px-3 py-1 rounded-full text-xs font-semibold '
+                                + (badgeClasses[health] ?? 'bg-gray-800 text-gray-400');
     }
 
     // ── Dashboard data poller ───────────────────────────────────────
@@ -365,11 +321,9 @@ function updateTimer() {
             if (! res.ok) return;
             const data = await res.json();
 
-            // Update tracking state for the timer
             const wasTracking = isTracking;
             isTracking = data.tracking_on;
 
-            // Only set startedAt once when tracking first begins — never overwrite it mid-session
             if (data.tracking_on && !wasTracking && data.analytics?.session_elapsed_seconds != null) {
                 startedAt = Date.now() - (Math.max(0, data.analytics.session_elapsed_seconds) * 1000);
             } else if (data.tracking_on && startedAt === null && data.analytics?.session_elapsed_seconds != null) {
@@ -378,7 +332,6 @@ function updateTimer() {
                 startedAt = null;
             }
 
-            // Metric cards
             if (data.latest_log) {
                 const log = data.latest_log;
                 document.getElementById('val-steps').textContent   = log.steps.toLocaleString();
@@ -396,13 +349,20 @@ function updateTimer() {
             const a = data.analytics;
             document.getElementById('val-pace').textContent =
                 a?.charging_pace_min_per_pct != null ? a.charging_pace_min_per_pct + ' min' : '—';
-            document.getElementById('val-eta').textContent  =
+            document.getElementById('val-eta').textContent =
                 a?.eta_to_full_minutes != null ? a.eta_to_full_minutes + ' min' : '—';
-            document.getElementById('val-student').textContent =
-                data.active_student?.name ?? '—';
+
+            // Active student — now shows name + email
+            if (data.active_student) {
+                document.getElementById('val-student').textContent       = data.active_student.name;
+                document.getElementById('val-student-email').textContent = data.active_student.email;
+            } else {
+                document.getElementById('val-student').textContent       = '—';
+                document.getElementById('val-student-email').textContent = '—';
+            }
 
         } catch (e) {
-            // silent fail — server might be momentarily busy
+            // silent fail
         }
     }
 

@@ -1,9 +1,9 @@
 <?php
 
 use App\Http\Controllers\Auth\LoginController;
+use App\Http\Controllers\Auth\GoogleController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\ReportsController;
-use App\Http\Controllers\StudentController;
 use Illuminate\Support\Facades\Route;
 
 // ── Auth routes ───────────────────────────────────────────────────────
@@ -16,25 +16,23 @@ Route::post('/logout', [LoginController::class, 'logout'])
     ->middleware('auth')
     ->name('logout');
 
+// ── QR / Google OAuth routes (no auth required) ───────────────────────
+Route::get('/scan',              [GoogleController::class, 'landing'])->name('qr.landing');
+Route::get('/auth/google',       [GoogleController::class, 'redirect'])->name('google.redirect');
+Route::get('/auth/google/callback', [GoogleController::class, 'callback'])->name('google.callback');
+Route::get('/scan/success',      [GoogleController::class, 'success'])->name('qr.success');
+
 // ── Authenticated routes ──────────────────────────────────────────────
 Route::middleware('auth')->group(function () {
 
     Route::get('/', fn () => redirect()->route('dashboard'));
 
     // Dashboard
-    Route::get('/dashboard',                 [DashboardController::class, 'index'])->name('dashboard');
-    Route::post('/dashboard/toggle',         [DashboardController::class, 'toggleTracking'])->name('dashboard.toggle');
-    Route::post('/dashboard/active-student', [DashboardController::class, 'setActiveStudent'])->name('dashboard.active-student');
+    Route::get('/dashboard', [DashboardController::class, 'index'])->name('dashboard');
 
-    // Students
-    Route::get('/students',              [StudentController::class, 'index'])->name('students.index');
-    Route::get('/students/create',       [StudentController::class, 'create'])->name('students.create');
-    Route::post('/students',             [StudentController::class, 'store'])->name('students.store');
-    Route::delete('/students/{student}', [StudentController::class, 'destroy'])->name('students.destroy');
-
-    // Reports — Phase 6
-    Route::get('/reports',                [ReportsController::class, 'index'])->name('reports.index');
-    Route::get('/reports/export/sessions',[ReportsController::class, 'exportSessions'])->name('reports.export.sessions');
-    Route::get('/reports/export/events',  [ReportsController::class, 'exportEvents'])->name('reports.export.events');
+    // Reports
+    Route::get('/reports',                 [ReportsController::class, 'index'])->name('reports.index');
+    Route::get('/reports/export/sessions', [ReportsController::class, 'exportSessions'])->name('reports.export.sessions');
+    Route::get('/reports/export/events',   [ReportsController::class, 'exportEvents'])->name('reports.export.events');
 
 });
