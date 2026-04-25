@@ -55,32 +55,34 @@
 
     </div>
 
-    <script>
-        let seconds = 1200;
-        const el = document.getElementById('countdown');
+<script>
+    const startedAt = {{ $activeSession ? $activeSession->started_at->timestamp * 1000 : 'Date.now()' }};
+    const DURATION  = 20 * 60 * 1000;
+    const el        = document.getElementById('countdown');
 
-        function tick() {
-            if (seconds <= 0) {
-                el.textContent = '00:00';
-                el.classList.remove('text-green-400');
-                el.classList.add('text-gray-500');
-                return;
-            }
-            seconds--;
-            const m = Math.floor(seconds / 60);
-            const s = seconds % 60;
-            el.textContent = `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
+    function tick() {
+        const remaining = Math.max(0, Math.floor((startedAt + DURATION - Date.now()) / 1000));
+        const m = Math.floor(remaining / 60);
+        const s = remaining % 60;
+        el.textContent = `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
 
-            if (seconds <= 60) {
-                el.classList.remove('text-green-400');
-                el.classList.add('text-red-400');
-            }
-
-            setTimeout(tick, 1000);
+        if (remaining <= 60) {
+            el.classList.remove('text-green-400');
+            el.classList.add('text-red-400');
         }
 
-        setTimeout(tick, 1000);
-    </script>
+        if (remaining > 0) setTimeout(tick, 1000);
+        else {
+            el.classList.remove('text-green-400', 'text-red-400');
+            el.classList.add('text-gray-500');
+        }
+    }
+
+    tick();
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') tick();
+    });
+</script>
 
 </body>
 </html>

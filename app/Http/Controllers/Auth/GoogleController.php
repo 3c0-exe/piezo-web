@@ -130,8 +130,12 @@ class GoogleController extends Controller
     }
 
     // ── Success page after session starts ────────────────────────────
-    public function success(): View
-    {
-        return view('auth.qr-success');
-    }
+public function success(): View
+{
+    $activeSession = ChargingSession::whereNull('ended_at')
+        ->latest('started_at')
+        ->first();
+
+    return view('auth.qr-success', compact('activeSession'));
+}
 }

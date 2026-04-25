@@ -62,9 +62,9 @@
             <div>
                 <p id="session-timer"
                    class="font-mono text-3xl font-bold text-white tracking-tight">
-                    {{ $settings->is_tracking_on && $settings->tracking_started_at
-                        ? gmdate('i:s', now()->diffInSeconds($settings->tracking_started_at))
-                        : '00:00' }}
+{{ $settings->is_tracking_on && $settings->tracking_started_at
+    ? gmdate('i:s', max(0, 1200 - now()->diffInSeconds($settings->tracking_started_at)))
+    : '20:00' }}
                 </p>
                 <p id="overtime-label" class="text-xs mt-1 {{ $settings->is_tracking_on ? 'text-gray-500' : 'text-gray-600' }}">
                     20:00 limit
@@ -218,33 +218,34 @@
     const timerEl    = document.getElementById('session-timer');
     const overtimeEl = document.getElementById('overtime-label');
 
-    function updateTimer() {
-        if (! isTracking || ! startedAt) {
-            timerEl.textContent = '00:00';
-            timerEl.classList.remove('text-red-400');
-            timerEl.classList.add('text-white');
-            overtimeEl.textContent = '20:00 limit';
-            overtimeEl.className   = 'text-xs mt-1 text-gray-600';
-            return;
-        }
-
-        const elapsed = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
-        const mins    = Math.floor(elapsed / 60);
-        const secs    = elapsed % 60;
-        timerEl.textContent = `${String(mins).padStart(2,'0')}:${String(secs).padStart(2,'0')}`;
-
-        if (elapsed > 1200) {
-            timerEl.classList.add('text-red-400');
-            timerEl.classList.remove('text-white');
-            overtimeEl.textContent = '⚠ OVERTIME';
-            overtimeEl.className   = 'text-xs mt-1 text-red-400 font-semibold animate-pulse';
-        } else {
-            timerEl.classList.remove('text-red-400');
-            timerEl.classList.add('text-white');
-            overtimeEl.textContent = '20:00 limit';
-            overtimeEl.className   = 'text-xs mt-1 text-gray-500';
-        }
+function updateTimer() {
+    if (! isTracking || ! startedAt) {
+        timerEl.textContent    = '20:00';
+        timerEl.classList.remove('text-red-400');
+        timerEl.classList.add('text-white');
+        overtimeEl.textContent = '20:00 limit';
+        overtimeEl.className   = 'text-xs mt-1 text-gray-600';
+        return;
     }
+
+    const elapsed   = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+    const remaining = Math.max(0, 1200 - elapsed);
+    const mins      = Math.floor(remaining / 60);
+    const secs      = remaining % 60;
+    timerEl.textContent = `${String(mins).padStart(2,'0')}:${String(secs).padStart(2,'0')}`;
+
+    if (elapsed > 1200) {
+        timerEl.classList.add('text-red-400');
+        timerEl.classList.remove('text-white');
+        overtimeEl.textContent = '⚠ OVERTIME';
+        overtimeEl.className   = 'text-xs mt-1 text-red-400 font-semibold animate-pulse';
+    } else {
+        timerEl.classList.remove('text-red-400');
+        timerEl.classList.add('text-white');
+        overtimeEl.textContent = '20:00 limit';
+        overtimeEl.className   = 'text-xs mt-1 text-gray-500';
+    }
+}
 
     setInterval(updateTimer, 1000);
     updateTimer();
