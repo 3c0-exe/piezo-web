@@ -59,8 +59,11 @@
     const startedAt = {{ $activeSession ? $activeSession->started_at->timestamp * 1000 : 'Date.now()' }};
     const DURATION  = 20 * 60 * 1000;
     const el        = document.getElementById('countdown');
+    let   isStopped = false;
 
     function tick() {
+        if (isStopped) return;
+
         const remaining = Math.max(0, Math.floor((startedAt + DURATION - Date.now()) / 1000));
         const m = Math.floor(remaining / 60);
         const s = remaining % 60;
@@ -78,26 +81,37 @@
         }
     }
 
-tick();
-document.addEventListener('visibilitychange', () => {
-    if (document.visibilityState === 'visible') tick();
-});
+    function showStopped(reason) {
+        isStopped = true;
+        el.textContent = '00:00';
+        el.classList.remove('text-green-400', 'text-red-400');
+        el.classList.add('text-gray-500');
 
-// ── Poll every 5s to detect manual stop ──────────────────
-async function checkIfStopped() {
-    try {
-        const res  = await fetch('/api/dashboard-data');
-        const data = await res.json();
-        if (! data.tracking_on && seconds > 0) {
-            el.textContent = '00:00';
-            el.classList.remove('text-green-400', 'text-red-400');
-            el.classList.add('text-gray-500');
-            document.getElementById('session-status-msg').textContent = 'Session was stopped by the admin.';
-            document.getElementById('session-status-msg').className = 'text-sm text-red-400 mt-2';
-        }
-    } catch (e) {}
-}
-setInterval(checkIfStopped, 5000);
+        const msg = document.getElementById('session-status-msg');
+        msg.textContent = reason;
+        msg.className   = 'text-sm text-red-400 mt-2';
+    }
+
+    tick();
+
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') tick();
+    });
+
+    // ── Poll every 5s to detect manual stop ──────────────────
+    async function checkIfStopped() {
+        if (isStopped) return;
+        try {
+            const res  = await fetch('/api/dashboard-data');
+            if (! res.ok) return;
+            const data = await res.json();
+            if (! data.tracking_on) {
+                showStopped('Session was stopped by the admin.');
+            }
+        } catch (e) {}
+    }
+
+    setInterval(checkIfStopped, 5000);
 </script>
 
 </body>
