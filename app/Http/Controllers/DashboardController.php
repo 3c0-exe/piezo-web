@@ -24,17 +24,18 @@ class DashboardController extends Controller
         return view('dashboard.index', compact('settings', 'activeSession'));
     }
 
-    public function stopSession(): RedirectResponse
-    {
-        $settings      = SystemSetting::current();
-        $activeSession = ChargingSession::whereNull('ended_at')
-            ->latest('started_at')
-            ->first();
+public function stopSession(): RedirectResponse
+{
+    $settings      = SystemSetting::current();
+    $activeSession = ChargingSession::whereNull('ended_at')
+        ->latest('started_at')
+        ->first();
 
-        if (! $activeSession) {
-            return back()->with('error', 'No active session to stop.');
-        }
+    if (! $activeSession) {
+        return back()->with('error', 'No active session to stop.');
+    }
 
+    try {
         $elapsed = now()->diffInSeconds($activeSession->started_at);
 
         $logs        = EnergyLog::where('student_email', $activeSession->student_email)
@@ -68,10 +69,14 @@ class DashboardController extends Controller
         ], retain: true);
 
         EventLog::record('session_stopped', 'Session manually stopped by admin.', [
-            'student_email'    => $activeSession->student_email,
-            'elapsed_seconds'  => $elapsed,
+            'student_email'   => $activeSession->student_email,
+            'elapsed_seconds' => $elapsed,
         ]);
 
         return back()->with('success', 'Session stopped successfully.');
+
+    } catch (\Throwable $e) {
+        dd($e->getMessage(), $e->getTraceAsString());
     }
+}
 }
