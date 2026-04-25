@@ -10,6 +10,7 @@ use Illuminate\Support\Facades\Route;
 Route::middleware('guest')->group(function () {
     Route::get('/login',  [LoginController::class, 'showForm'])->name('login');
     Route::post('/login', [LoginController::class, 'login']);
+    Route::post('/dashboard/stop', [DashboardController::class, 'stopSession'])->name('dashboard.stop');
 });
 
 Route::post('/logout', [LoginController::class, 'logout'])

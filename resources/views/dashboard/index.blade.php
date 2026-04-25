@@ -31,15 +31,24 @@
         {{-- Active Student --}}
         <div class="bg-gray-900 border border-gray-800 rounded-2xl p-6">
             <p class="text-xs font-semibold text-gray-500 uppercase tracking-widest mb-4">Currently Charging</p>
-            @if ($activeSession)
-                <p class="text-sm font-semibold text-white">{{ $activeSession->student_name }}</p>
-                <p class="text-xs text-gray-500 mt-1">{{ $activeSession->student_email }}</p>
-                <p class="text-xs text-gray-600 mt-1">
-                    Started: <span class="text-gray-400">{{ $activeSession->started_at->format('h:i A') }}</span>
-                </p>
-            @else
-                <p class="text-sm text-gray-600 italic">No active session — waiting for QR scan.</p>
-            @endif
+@if ($activeSession)
+    <p class="text-sm font-semibold text-white">{{ $activeSession->student_name }}</p>
+    <p class="text-xs text-gray-500 mt-1">{{ $activeSession->student_email }}</p>
+    <p class="text-xs text-gray-600 mt-1">
+        Started: <span class="text-gray-400">{{ $activeSession->started_at->format('h:i A') }}</span>
+    </p>
+    <form method="POST" action="{{ route('dashboard.stop') }}" class="mt-4">
+        @csrf
+        <button type="submit"
+                onclick="return confirm('Force stop this session?')"
+                class="px-4 py-2 rounded-xl text-xs font-semibold bg-red-500/10 text-red-400
+                       border border-red-500/30 hover:bg-red-500/20 transition">
+            Force Stop Session
+        </button>
+    </form>
+@else
+    <p class="text-sm text-gray-600 italic">No active session — waiting for QR scan.</p>
+@endif
         </div>
 
     </div>
