@@ -3,6 +3,10 @@
 @section('title', 'Dashboard — Piezo')
 @section('page-title', 'Live Dashboard')
 
+@push('head')
+<meta name="csrf-token" content="{{ csrf_token() }}">
+@endpush
+
 @section('content')
 <div class="mt-6 space-y-6" id="dashboard-root">
 
@@ -23,32 +27,33 @@
                         {{ $settings->is_tracking_on ? 'TRACKING ON' : 'TRACKING OFF' }}
                     </span>
                 </div>
-                {{-- No button — fully automatic now --}}
                 <div class="text-xs text-gray-600 italic">Auto · QR controlled</div>
             </div>
         </div>
 
-        {{-- Active Student --}}
+        {{-- Currently Charging --}}
         <div class="bg-gray-900 border border-gray-800 rounded-2xl p-6">
             <p class="text-xs font-semibold text-gray-500 uppercase tracking-widest mb-4">Currently Charging</p>
-@if ($activeSession)
-    <p class="text-sm font-semibold text-white">{{ $activeSession->student_name }}</p>
-    <p class="text-xs text-gray-500 mt-1">{{ $activeSession->student_email }}</p>
-    <p class="text-xs text-gray-600 mt-1">
-        Started: <span class="text-gray-400">{{ $activeSession->started_at->format('h:i A') }}</span>
-    </p>
-    <form method="POST" action="{{ route('dashboard.stop') }}" class="mt-4">
-        @csrf
-        <button type="submit"
-                onclick="return confirm('Force stop this session?')"
-                class="px-4 py-2 rounded-xl text-xs font-semibold bg-red-500/10 text-red-400
-                       border border-red-500/30 hover:bg-red-500/20 transition">
-            Force Stop Session
-        </button>
-    </form>
-@else
-    <p class="text-sm text-gray-600 italic">No active session — waiting for QR scan.</p>
-@endif
+            <div id="currently-charging-content">
+                @if ($activeSession)
+                    <p class="text-sm font-semibold text-white">{{ $activeSession->student_name }}</p>
+                    <p class="text-xs text-gray-500 mt-1">{{ $activeSession->student_email }}</p>
+                    <p class="text-xs text-gray-600 mt-1">
+                        Started: <span class="text-gray-400">{{ $activeSession->started_at->format('h:i A') }}</span>
+                    </p>
+                    <form method="POST" action="{{ route('dashboard.stop') }}" class="mt-4">
+                        @csrf
+                        <button type="submit"
+                                onclick="return confirm('Force stop this session?')"
+                                class="px-4 py-2 rounded-xl text-xs font-semibold bg-red-500/10 text-red-400
+                                       border border-red-500/30 hover:bg-red-500/20 transition">
+                            Force Stop Session
+                        </button>
+                    </form>
+                @else
+                    <p class="text-sm text-gray-600 italic">No active session — waiting for QR scan.</p>
+                @endif
+            </div>
         </div>
 
     </div>
@@ -62,9 +67,9 @@
             <div>
                 <p id="session-timer"
                    class="font-mono text-3xl font-bold text-white tracking-tight">
-{{ $settings->is_tracking_on && $settings->tracking_started_at
-    ? gmdate('i:s', max(0, 1200 - now()->diffInSeconds($settings->tracking_started_at)))
-    : '20:00' }}
+                    {{ $settings->is_tracking_on && $settings->tracking_started_at
+                        ? gmdate('i:s', max(0, 1200 - now()->diffInSeconds($settings->tracking_started_at)))
+                        : '20:00' }}
                 </p>
                 <p id="overtime-label" class="text-xs mt-1 {{ $settings->is_tracking_on ? 'text-gray-500' : 'text-gray-600' }}">
                     20:00 limit
@@ -218,34 +223,34 @@
     const timerEl    = document.getElementById('session-timer');
     const overtimeEl = document.getElementById('overtime-label');
 
-function updateTimer() {
-    if (! isTracking || ! startedAt) {
-        timerEl.textContent    = '20:00';
-        timerEl.classList.remove('text-red-400');
-        timerEl.classList.add('text-white');
-        overtimeEl.textContent = '20:00 limit';
-        overtimeEl.className   = 'text-xs mt-1 text-gray-600';
-        return;
-    }
+    function updateTimer() {
+        if (! isTracking || ! startedAt) {
+            timerEl.textContent    = '20:00';
+            timerEl.classList.remove('text-red-400');
+            timerEl.classList.add('text-white');
+            overtimeEl.textContent = '20:00 limit';
+            overtimeEl.className   = 'text-xs mt-1 text-gray-600';
+            return;
+        }
 
-    const elapsed   = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
-    const remaining = Math.max(0, 1200 - elapsed);
-    const mins      = Math.floor(remaining / 60);
-    const secs      = remaining % 60;
-    timerEl.textContent = `${String(mins).padStart(2,'0')}:${String(secs).padStart(2,'0')}`;
+        const elapsed   = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+        const remaining = Math.max(0, 1200 - elapsed);
+        const mins      = Math.floor(remaining / 60);
+        const secs      = remaining % 60;
+        timerEl.textContent = `${String(mins).padStart(2,'0')}:${String(secs).padStart(2,'0')}`;
 
-    if (elapsed > 1200) {
-        timerEl.classList.add('text-red-400');
-        timerEl.classList.remove('text-white');
-        overtimeEl.textContent = '⚠ OVERTIME';
-        overtimeEl.className   = 'text-xs mt-1 text-red-400 font-semibold animate-pulse';
-    } else {
-        timerEl.classList.remove('text-red-400');
-        timerEl.classList.add('text-white');
-        overtimeEl.textContent = '20:00 limit';
-        overtimeEl.className   = 'text-xs mt-1 text-gray-500';
+        if (elapsed > 1200) {
+            timerEl.classList.add('text-red-400');
+            timerEl.classList.remove('text-white');
+            overtimeEl.textContent = '⚠ OVERTIME';
+            overtimeEl.className   = 'text-xs mt-1 text-red-400 font-semibold animate-pulse';
+        } else {
+            timerEl.classList.remove('text-red-400');
+            timerEl.classList.add('text-white');
+            overtimeEl.textContent = '20:00 limit';
+            overtimeEl.className   = 'text-xs mt-1 text-gray-500';
+        }
     }
-}
 
     setInterval(updateTimer, 1000);
     updateTimer();
@@ -315,13 +320,51 @@ function updateTimer() {
         };
 
         const color = colors[health] ?? '#4ade80';
-        arc.style.stroke        = color;
-        bar.style.width         = pct + '%';
+        arc.style.stroke          = color;
+        bar.style.width           = pct + '%';
         bar.style.backgroundColor = color;
-        text.textContent        = pct.toFixed(1) + '%';
-        badge.textContent       = health ?? 'Unknown';
-        badge.className         = 'mt-2 px-3 py-1 rounded-full text-xs font-semibold '
-                                + (badgeClasses[health] ?? 'bg-gray-800 text-gray-400');
+        text.textContent          = pct.toFixed(1) + '%';
+        badge.textContent         = health ?? 'Unknown';
+        badge.className           = 'mt-2 px-3 py-1 rounded-full text-xs font-semibold '
+                                  + (badgeClasses[health] ?? 'bg-gray-800 text-gray-400');
+    }
+
+    // ── Update tracking badge ───────────────────────────────────────
+    function updateTrackingBadge(trackingOn) {
+        const badge = document.getElementById('tracking-badge');
+        if (! badge) return;
+        badge.className = `inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold ${
+            trackingOn ? 'bg-green-500/15 text-green-400' : 'bg-gray-700 text-gray-400'
+        }`;
+        badge.innerHTML = `
+            <span class="w-1.5 h-1.5 rounded-full ${trackingOn ? 'bg-green-400 animate-pulse' : 'bg-gray-500'}"></span>
+            ${trackingOn ? 'TRACKING ON' : 'TRACKING OFF'}
+        `;
+    }
+
+    // ── Update currently charging card ──────────────────────────────
+    function updateChargingCard(activeStudent) {
+        const card = document.getElementById('currently-charging-content');
+        if (! card) return;
+
+        if (activeStudent) {
+            const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
+            card.innerHTML = `
+                <p class="text-sm font-semibold text-white">${activeStudent.name}</p>
+                <p class="text-xs text-gray-500 mt-1">${activeStudent.email}</p>
+                <form method="POST" action="/dashboard/stop" class="mt-4">
+                    <input type="hidden" name="_token" value="${csrfToken}">
+                    <button type="submit"
+                            onclick="return confirm('Force stop this session?')"
+                            class="px-4 py-2 rounded-xl text-xs font-semibold bg-red-500/10 text-red-400
+                                   border border-red-500/30 hover:bg-red-500/20 transition">
+                        Force Stop Session
+                    </button>
+                </form>
+            `;
+        } else {
+            card.innerHTML = `<p class="text-sm text-gray-600 italic">No active session — waiting for QR scan.</p>`;
+        }
     }
 
     // ── Dashboard data poller ───────────────────────────────────────
@@ -334,13 +377,16 @@ function updateTimer() {
             const wasTracking = isTracking;
             isTracking = data.tracking_on;
 
-            if (data.tracking_on && !wasTracking && data.analytics?.session_elapsed_seconds != null) {
-                startedAt = Date.now() - (Math.max(0, data.analytics.session_elapsed_seconds) * 1000);
-            } else if (data.tracking_on && startedAt === null && data.analytics?.session_elapsed_seconds != null) {
+            // ── Update timer startedAt ────────────────────────────
+            if (data.tracking_on && data.analytics?.session_elapsed_seconds != null) {
                 startedAt = Date.now() - (Math.max(0, data.analytics.session_elapsed_seconds) * 1000);
             } else if (! data.tracking_on) {
                 startedAt = null;
             }
+
+            // ── Update badge + charging card ──────────────────────
+            updateTrackingBadge(data.tracking_on);
+            updateChargingCard(data.active_student ?? null);
 
             if (data.latest_log) {
                 const log = data.latest_log;
@@ -355,14 +401,13 @@ function updateTimer() {
                 setChargingSignal(log.is_charging ?? false, log.battery_percentage, log.charging_source ?? null);
             }
 
-            // Analytics
+            // ── Analytics ─────────────────────────────────────────
             const a = data.analytics;
             document.getElementById('val-pace').textContent =
                 a?.charging_pace_min_per_pct != null ? a.charging_pace_min_per_pct + ' min' : '—';
             document.getElementById('val-eta').textContent =
                 a?.eta_to_full_minutes != null ? a.eta_to_full_minutes + ' min' : '—';
 
-            // Active student — now shows name + email
             if (data.active_student) {
                 document.getElementById('val-student').textContent       = data.active_student.name;
                 document.getElementById('val-student-email').textContent = data.active_student.email;

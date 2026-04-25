@@ -51,7 +51,7 @@
             <p class="text-xs text-gray-600 mt-2">Session ends automatically</p>
         </div>
 
-        <p class="text-xs text-gray-600">You may close this page — your session will continue.</p>
+        <p id="session-status-msg" class="text-xs text-gray-600">You may close this page — your session will continue.</p>
 
     </div>
 
@@ -78,10 +78,26 @@
         }
     }
 
-    tick();
-    document.addEventListener('visibilitychange', () => {
-        if (document.visibilityState === 'visible') tick();
-    });
+tick();
+document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') tick();
+});
+
+// ── Poll every 5s to detect manual stop ──────────────────
+async function checkIfStopped() {
+    try {
+        const res  = await fetch('/api/dashboard-data');
+        const data = await res.json();
+        if (! data.tracking_on && seconds > 0) {
+            el.textContent = '00:00';
+            el.classList.remove('text-green-400', 'text-red-400');
+            el.classList.add('text-gray-500');
+            document.getElementById('session-status-msg').textContent = 'Session was stopped by the admin.';
+            document.getElementById('session-status-msg').className = 'text-sm text-red-400 mt-2';
+        }
+    } catch (e) {}
+}
+setInterval(checkIfStopped, 5000);
 </script>
 
 </body>
