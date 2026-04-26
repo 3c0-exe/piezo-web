@@ -56,8 +56,11 @@ class DashboardController extends Controller
 
         $analytics = $this->analytics->compute($settings, $activeSession);
 
+        $sessionsToday = \App\Models\ChargingSession::whereDate('started_at', today())->count();
+
         return response()->json([
             'tracking_on'    => $activeSession !== null,
+            'sessions_today' => $sessionsToday,
             'active_student' => $activeSession
                 ? [
                     'name'          => $activeSession->student_name,

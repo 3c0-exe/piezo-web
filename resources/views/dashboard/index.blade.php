@@ -79,9 +79,12 @@
 
         {{-- Steps --}}
         <div class="bg-gray-900 border border-gray-800 rounded-2xl p-6">
-            <p class="text-xs font-semibold text-gray-500 uppercase tracking-widest mb-2">Steps</p>
-            <p id="val-steps" class="font-mono text-2xl font-bold text-white">—</p>
-            <p class="text-xs text-gray-600 mt-1">total detected</p>
+            <p class="text-xs font-semibold text-gray-500 uppercase tracking-widest mb-2">Steps to Full</p>
+            <p id="val-steps-to-full" class="font-mono text-2xl font-bold text-white">—</p>
+            <p class="text-xs text-gray-600 mt-1">
+                est. steps remaining &nbsp;·&nbsp;
+                <span id="val-steps" class="font-mono text-gray-500 text-xs"></span> taken
+            </p>
         </div>
 
         {{-- Watts --}}
@@ -172,20 +175,29 @@
 
             <div class="space-y-4">
 
-                {{-- Charging Pace --}}
+                {{-- Total Energy Harvested --}}
                 <div class="flex items-center justify-between py-3 border-b border-gray-800">
                     <div>
-                        <p class="text-sm text-gray-300 font-medium">Charging Pace</p>
-                        <p class="text-xs text-gray-600">minutes per 1% gained</p>
+                        <p class="text-sm text-gray-300 font-medium">Energy Harvested</p>
+                        <p class="text-xs text-gray-600">total watt-hours this session</p>
                     </div>
-                    <p id="val-pace" class="font-mono text-xl font-bold text-white">—</p>
+                    <p id="val-energy" class="font-mono text-xl font-bold text-white">— Wh</p>
+                </div>
+
+                {{-- Total Sessions Today --}}
+                <div class="flex items-center justify-between py-3 border-b border-gray-800">
+                    <div>
+                        <p class="text-sm text-gray-300 font-medium">Sessions Today</p>
+                        <p class="text-xs text-gray-600">charging sessions started</p>
+                    </div>
+                    <p id="val-sessions-today" class="font-mono text-xl font-bold text-white">—</p>
                 </div>
 
                 {{-- ETA to Full --}}
                 <div class="flex items-center justify-between py-3 border-b border-gray-800">
                     <div>
                         <p class="text-sm text-gray-300 font-medium">ETA to Full</p>
-                        <p class="text-xs text-gray-600">estimated minutes remaining</p>
+                        <p id="val-eta-label" class="text-xs text-gray-600">estimated time remaining</p>
                     </div>
                     <p id="val-eta" class="font-mono text-xl font-bold text-white">—</p>
                 </div>
@@ -404,7 +416,17 @@
             // ── Live sensor readings ──────────────────────────────
             if (data.latest_log) {
                 const log = data.latest_log;
-                document.getElementById('val-steps').textContent   = log.steps  != null ? log.steps.toLocaleString()   : '0';
+                const stepsTaken = log.steps != null ? log.steps : 0;
+                // Rough estimate: ~1 step per 0.03W, battery needs ~(100-pct) * someConstant
+                // Simpler: steps taken so far / battery gained * remaining battery
+                const pct = log.battery_percentage ?? 0;
+                const STEPS_PER_PCT = 750;
+                const totalNeeded   = Math.round(100 * STEPS_PER_PCT);
+                const stepsToFull   = pct < 100
+                    ? Math.max(0, totalNeeded - stepsTaken)
+                    : 0;
+                document.getElementById('val-steps').textContent        = stepsTaken.toLocaleString();
+                document.getElementById('val-steps-to-full').textContent = stepsToFull != null ? stepsToFull.toLocaleString() : '—';
                 document.getElementById('val-watts').textContent   = log.watts  != null ? log.watts.toFixed(4) + ' W'  : '0.0000 W';
                 document.getElementById('val-voltage').textContent = log.voltage != null ? log.voltage.toFixed(3) + ' V' : '—';
 
@@ -417,10 +439,26 @@
 
             // ── Analytics ─────────────────────────────────────────
             const a = data.analytics;
-            document.getElementById('val-pace').textContent =
-                a?.charging_pace_min_per_pct != null ? a.charging_pace_min_per_pct + ' min' : '—';
-            document.getElementById('val-eta').textContent =
-                a?.eta_to_full_minutes != null ? a.eta_to_full_minutes + ' min' : '—';
+            // ── ETA smart formatting ──────────────────────────────
+            function formatEta(minutes) {
+                if (minutes == null) return '—';
+                const secs  = minutes * 60;
+                if (secs < 60)                return Math.round(secs) + ' sec';
+                if (minutes < 60)             return Math.round(minutes) + ' min';
+                if (minutes < 1440)           return (minutes / 60).toFixed(1) + ' hrs';
+                if (minutes < 10080)          return (minutes / 1440).toFixed(1) + ' days';
+                if (minutes < 43200)          return (minutes / 10080).toFixed(1) + ' wks';
+                return (minutes / 43200).toFixed(1) + ' mos';
+            }
+
+            document.getElementById('val-eta').textContent = formatEta(a?.eta_to_full_minutes ?? null);
+document.getElementById('val-sessions-today').textContent = data.sessions_today ?? '0';
+            // ── Energy harvested: watts × tick interval (3s) in Wh ─
+            const watts     = data.latest_log?.watts ?? 0;
+            const prevEnergy = parseFloat(document.getElementById('val-energy').dataset.wh ?? '0');
+            const newEnergy  = prevEnergy + (watts * (3 / 3600));
+            document.getElementById('val-energy').dataset.wh  = newEnergy;
+            document.getElementById('val-energy').textContent = newEnergy.toFixed(4) + ' Wh';
 
             if (data.active_student) {
                 document.getElementById('val-student').textContent       = data.active_student.name;
