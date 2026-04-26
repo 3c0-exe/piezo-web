@@ -391,9 +391,9 @@ card.innerHTML = `
 
             if (data.latest_log) {
                 const log = data.latest_log;
-                document.getElementById('val-steps').textContent   = log.steps.toLocaleString();
-                document.getElementById('val-watts').textContent   = log.watts.toFixed(4) + ' W';
-                document.getElementById('val-voltage').textContent = log.voltage.toFixed(3) + ' V';
+document.getElementById('val-steps').textContent   = log.steps != null  ? log.steps.toLocaleString()  : '—';
+document.getElementById('val-watts').textContent   = log.watts != null  ? log.watts.toFixed(4) + ' W' : '—';
+document.getElementById('val-voltage').textContent = log.voltage != null ? log.voltage.toFixed(3) + ' V' : '—';
 
                 const ageSec = Math.floor((Date.now() - new Date(log.logged_at).getTime()) / 1000);
                 document.getElementById('val-updated').textContent = ageSec + 's';

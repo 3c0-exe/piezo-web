@@ -8,6 +8,7 @@ use App\Models\EventLog;
 use App\Models\SystemSetting;
 use App\Services\MqttService;
 use Illuminate\Console\Command;
+use Illuminate\Support\Facades\Cache;
 
 class MqttListen extends Command
 {
@@ -43,6 +44,22 @@ class MqttListen extends Command
                 $stepCount
             ));
 
+            // ── Always cache the latest raw reading from the ESP32 ────────
+            // This lets the dashboard show live battery/voltage data even
+            // when no charging session is active.
+            if ($voltage !== null) {
+                Cache::put('esp32_latest', [
+                    'voltage'            => $voltage,
+                    'battery_percentage' => $this->deriveBatteryPercentage($voltage),
+                    'battery_health'     => $this->deriveBatteryHealth($voltage),
+                    'is_charging'        => (bool) $isCharging,
+                    'charging_source'    => null,
+                    'steps'              => null,
+                    'watts'              => null,
+                    'logged_at'          => now()->toISOString(),
+                ], 60); // expires after 60s of no data = ESP32 gone offline
+            }
+
             $this->processPayload($voltage, (bool) $isCharging, (int) $stepCount);
         });
 
@@ -50,7 +67,7 @@ class MqttListen extends Command
     }
 
     // ── State ─────────────────────────────────────────────────────────
-    private int  $nonChargingTick         = 0;
+    private int  $nonChargingTick          = 0;
     private int  $lastOvertimeMinuteLogged = 0;
     private bool $lastWasCharging          = false;
     private ?string $currentChargingSource = null;
@@ -134,8 +151,8 @@ class MqttListen extends Command
             $this->nonChargingTick++;
 
             $wasCharging = $this->lastWasCharging;
-            $this->lastWasCharging         = false;
-            $this->currentChargingSource   = null;
+            $this->lastWasCharging       = false;
+            $this->currentChargingSource = null;
 
             if (! $wasCharging && $this->nonChargingTick % 16 !== 1) {
                 return;
@@ -199,7 +216,7 @@ class MqttListen extends Command
             $voltage >= 3.40 =>  25,
             $voltage >= 3.20 =>  10,
             default          =>   0,
-        };
+        };d
     }
 
     // ── Health Lookup Table ───────────────────────────────────────────

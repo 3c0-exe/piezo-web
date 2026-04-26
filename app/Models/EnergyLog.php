@@ -3,20 +3,21 @@
 namespace App\Models;
 
 use Illuminate\Database\Eloquent\Model;
-use Illuminate\Database\Eloquent\Relations\BelongsTo;
 
 class EnergyLog extends Model
 {
     public $timestamps = false;
 
     protected $fillable = [
-        'student_id',
+        'student_email',
+        'student_name',
         'steps',
         'watts',
         'voltage',
         'battery_percentage',
         'battery_health',
         'is_charging',
+        'charging_source',
         'logged_at',
     ];
 
@@ -28,9 +29,4 @@ class EnergyLog extends Model
         'steps'              => 'integer',
         'is_charging'        => 'boolean',
     ];
-
-    public function student(): BelongsTo
-    {
-        return $this->belongsTo(Student::class);
-    }
 }
