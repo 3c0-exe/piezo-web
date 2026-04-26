@@ -4,6 +4,7 @@ use App\Http\Controllers\Auth\LoginController;
 use App\Http\Controllers\Auth\GoogleController;
 use App\Http\Controllers\DashboardController;
 use App\Http\Controllers\ReportsController;
+use App\Http\Controllers\StudentController;
 use Illuminate\Support\Facades\Route;
 
 // ── Auth routes ───────────────────────────────────────────────────────
@@ -24,6 +25,8 @@ Route::get('/scan/success',      [GoogleController::class, 'success'])->name('qr
 
 // ── Authenticated routes ──────────────────────────────────────────────
 Route::middleware('auth')->group(function () {
+
+Route::get('/students', [StudentController::class, 'index'])->name('students.index');
 
     Route::post('/dashboard/stop', [DashboardController::class, 'stopSession'])->name('dashboard.stop');
 
