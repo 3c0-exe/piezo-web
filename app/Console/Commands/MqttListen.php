@@ -63,7 +63,7 @@ if ($voltage !== null) {
                     'steps'              => $totalSteps,
                     'watts'              => $stepCount > 0 ? $watts : ($prev['watts'] ?? 0.0),
                     'logged_at'          => now()->toISOString(),
-                ], 300); // 5 min expiry so steps persist between ticks
+                ], 86400); // 24hr — persist last known state indefinitely
             }
 
             $this->processPayload($voltage, (bool) $isCharging, (int) $stepCount);
