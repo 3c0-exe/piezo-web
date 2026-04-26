@@ -414,8 +414,8 @@
             updateChargingCard(data.active_student ?? null);
 
             // ── Live sensor readings ──────────────────────────────
-            if (data.latest_log) {
-                const log = data.latest_log;
+            document.getElementById('val-eta').textContent = formatEta(a?.eta_to_full_minutes ?? null);
+            document.getElementById('val-sessions-today').textContent = data.sessions_today ?? '0';
                 const stepsTaken = log.steps != null ? log.steps : 0;
                 // Rough estimate: ~1 step per 0.03W, battery needs ~(100-pct) * someConstant
                 // Simpler: steps taken so far / battery gained * remaining battery
