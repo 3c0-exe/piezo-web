@@ -1,0 +1,1865 @@
+diff --git a/Dockerfile b/Dockerfile
+index b71f93f..17ec089 100644
+--- a/Dockerfile
++++ b/Dockerfile
+@@ -19,5 +19,6 @@ CMD cp /etc/secrets/.env /var/www/.env && \
+     php artisan config:clear && \
+     php artisan migrate --force && \
+     php artisan mqtt:listen & \
++    php artisan queue:listen --tries=1 --timeout=0 & \
+     (while true; do php artisan schedule:run --verbose --no-interaction; sleep 60; done) & \
+     php artisan serve --host=0.0.0.0 --port=8000
+\ No newline at end of file
+diff --git a/app/Console/Commands/MqttListen.php b/app/Console/Commands/MqttListen.php
+index 37ece99..4b035a5 100644
+--- a/app/Console/Commands/MqttListen.php
++++ b/app/Console/Commands/MqttListen.php
+@@ -8,6 +8,7 @@
+ use App\Models\SystemSetting;
+ use App\Services\MqttService;
+ use Illuminate\Console\Command;
++use Illuminate\Support\Facades\Cache;
+ 
+ class MqttListen extends Command
+ {
+@@ -43,19 +44,35 @@ public function handle(MqttService $mqtt): int
+                 $stepCount
+             ));
+ 
++            // ── Always cache the latest raw reading from the ESP32 ────────
++            // This lets the dashboard show live battery/voltage data even
++            // when no charging session is active.
++            if ($voltage !== null) {
++                Cache::put('esp32_latest', [
++                    'voltage'            => $voltage,
++                    'battery_percentage' => $this->deriveBatteryPercentage($voltage),
++                    'battery_health'     => $this->deriveBatteryHealth($voltage),
++                    'is_charging'        => (bool) $isCharging,
++                    'charging_source'    => null,
++                    'steps'              => null,
++                    'watts'              => null,
++                    'logged_at'          => now()->toISOString(),
++                ], 60); // expires after 60s of no data = ESP32 gone offline
++            }
++
+             $this->processPayload($voltage, (bool) $isCharging, (int) $stepCount);
+         });
+ 
+         return 0;
+     }
+ 
+-    // ── State ────────────────────────────────────────────────────────────────
+-    private int     $nonChargingTick          = 0;
+-    private int     $lastOvertimeMinuteLogged  = 0;
+-    private bool    $lastWasCharging           = false;
+-    private ?string $currentChargingSource     = null;  // ← new
++    // ── State ─────────────────────────────────────────────────────────
++    private int  $nonChargingTick          = 0;
++    private int  $lastOvertimeMinuteLogged = 0;
++    private bool $lastWasCharging          = false;
++    private ?string $currentChargingSource = null;
+ 
+-    // ── Payload Processor ────────────────────────────────────────────────────
++    // ── Payload Processor ─────────────────────────────────────────────
+     private function processPayload(?float $voltage, bool $isCharging, int $stepCount): void
+     {
+         $settings = SystemSetting::current();
+@@ -69,17 +86,34 @@ private function processPayload(?float $voltage, bool $isCharging, int $stepCoun
+             return;
+         }
+ 
+-        $studentId         = $settings->active_student_id;
++        $studentEmail      = $settings->active_student_email;
++        $studentName       = $settings->active_student_name;
+         $batteryPercentage = $this->deriveBatteryPercentage($voltage);
+         $batteryHealth     = $this->deriveBatteryHealth($voltage);
+ 
+-        $lastLog      = EnergyLog::where('student_id', $studentId)
+-                            ->orderByDesc('logged_at')
+-                            ->first();
++        // ── Find active session ───────────────────────────────────────
++        $session = ChargingSession::where('student_email', $studentEmail)
++            ->whereNull('ended_at')
++            ->latest('started_at')
++            ->first();
++
++        if (! $session) {
++            $this->warn('[' . now()->format('H:i:s') . '] ⚠ No active session found — skipping.');
++            return;
++        }
++
++        // ── Set battery_start on first log ────────────────────────────
++        if ($session->battery_start === null) {
++            $session->update(['battery_start' => $batteryPercentage]);
++        }
++
++        $lastLog      = EnergyLog::where('student_email', $studentEmail)
++            ->orderByDesc('logged_at')
++            ->first();
+         $currentSteps = $lastLog ? $lastLog->steps : 0;
+ 
+         if ($isCharging) {
+-            // ── Charging tick ────────────────────────────────────────────────
++            // ── Charging tick ─────────────────────────────────────────
+             $currentSteps += $stepCount;
+ 
+             $baseWatts = $stepCount > 0
+@@ -87,40 +121,46 @@ private function processPayload(?float $voltage, bool $isCharging, int $stepCoun
+                 : 0.0;
+             $watts = min(0.8, $baseWatts);
+ 
+-            // Lock in source at session start only — don't overwrite mid-session
+             if (! $this->lastWasCharging) {
+                 $this->currentChargingSource = $stepCount > 0 ? 'piezo' : 'ac';
+             }
+ 
+             EnergyLog::create([
+-                'student_id'         => $studentId,
++                'student_email'      => $studentEmail,
++                'student_name'       => $studentName,
+                 'steps'              => $currentSteps,
+                 'watts'              => $watts,
+                 'voltage'            => $voltage,
+                 'battery_percentage' => $batteryPercentage,
+                 'battery_health'     => $batteryHealth,
+                 'is_charging'        => true,
+-                'charging_source'    => $this->currentChargingSource,  // ← changed
++                'charging_source'    => $this->currentChargingSource,
+                 'logged_at'          => now(),
+             ]);
+ 
+-            $this->checkOvertime($settings, $studentId);
++            // ── Update peak watts on session ──────────────────────────
++            if ($watts > ($session->peak_watts ?? 0)) {
++                $session->update(['peak_watts' => $watts]);
++            }
++
++            $this->checkOvertime($settings, $session);
+             $this->lastWasCharging = true;
+ 
+         } else {
+-            // ── Non-charging tick ────────────────────────────────────────────
++            // ── Non-charging tick ─────────────────────────────────────
+             $this->nonChargingTick++;
+ 
+             $wasCharging = $this->lastWasCharging;
+-            $this->lastWasCharging = false;
+-            $this->currentChargingSource = null;  // ← new: reset source on unplug
++            $this->lastWasCharging       = false;
++            $this->currentChargingSource = null;
+ 
+             if (! $wasCharging && $this->nonChargingTick % 16 !== 1) {
+                 return;
+             }
+ 
+             EnergyLog::create([
+-                'student_id'         => $studentId,
++                'student_email'      => $studentEmail,
++                'student_name'       => $studentName,
+                 'steps'              => $currentSteps,
+                 'watts'              => 0,
+                 'voltage'            => $voltage,
+@@ -133,8 +173,8 @@ private function processPayload(?float $voltage, bool $isCharging, int $stepCoun
+         }
+     }
+ 
+-    // ── Overtime Check ───────────────────────────────────────────────────────
+-    private function checkOvertime(SystemSetting $settings, ?int $studentId): void
++    // ── Overtime Check ────────────────────────────────────────────────
++    private function checkOvertime(SystemSetting $settings, ChargingSession $session): void
+     {
+         if (! $settings->tracking_started_at) {
+             return;
+@@ -148,9 +188,7 @@ private function checkOvertime(SystemSetting $settings, ?int $studentId): void
+         }
+ 
+         if ($elapsedMinutes === 21) {
+-            ChargingSession::where('student_id', $studentId)
+-                ->whereNull('ended_at')
+-                ->update(['flagged_overtime' => true]);
++            $session->update(['flagged_overtime' => true]);
+         }
+ 
+         if ($elapsedMinutes > $this->lastOvertimeMinuteLogged) {
+@@ -159,29 +197,29 @@ private function checkOvertime(SystemSetting $settings, ?int $studentId): void
+             EventLog::record(
+                 'session_overtime',
+                 "Session is overtime at {$elapsedMinutes} minutes.",
+-                ['elapsed_seconds' => $elapsed, 'student_id' => $studentId]
++                ['elapsed_seconds' => $elapsed, 'student_email' => $session->student_email]
+             );
+ 
+             $this->warn('[' . now()->format('H:i:s') . "] ⚠ OVERTIME — {$elapsedMinutes} min elapsed.");
+         }
+     }
+ 
+-    // ── Voltage Lookup Table ─────────────────────────────────────────────────
++    // ── Voltage Lookup Table ──────────────────────────────────────────
+     private function deriveBatteryPercentage(float $voltage): int
+     {
+         return match(true) {
+             $voltage >= 4.15 => 100,
+-            $voltage >= 4.00 => 85,
+-            $voltage >= 3.85 => 70,
+-            $voltage >= 3.70 => 55,
+-            $voltage >= 3.55 => 40,
+-            $voltage >= 3.40 => 25,
+-            $voltage >= 3.20 => 10,
+-            default          => 0,
+-        };
++            $voltage >= 4.00 =>  85,
++            $voltage >= 3.85 =>  70,
++            $voltage >= 3.70 =>  55,
++            $voltage >= 3.55 =>  40,
++            $voltage >= 3.40 =>  25,
++            $voltage >= 3.20 =>  10,
++            default          =>   0,
++        };d
+     }
+ 
+-    // ── Health Lookup Table ──────────────────────────────────────────────────
++    // ── Health Lookup Table ───────────────────────────────────────────
+     private function deriveBatteryHealth(float $voltage): string
+     {
+         return match(true) {
+diff --git a/app/Http/Controllers/Api/DashboardController.php b/app/Http/Controllers/Api/DashboardController.php
+index 16eea3f..605fc43 100644
+--- a/app/Http/Controllers/Api/DashboardController.php
++++ b/app/Http/Controllers/Api/DashboardController.php
+@@ -3,56 +3,71 @@
+ namespace App\Http\Controllers\Api;
+ 
+ use App\Http\Controllers\Controller;
++use App\Models\ChargingSession;
+ use App\Models\EnergyLog;
+ use App\Models\SystemSetting;
+ use App\Services\AnalyticsService;
+ use Illuminate\Http\JsonResponse;
++use Illuminate\Support\Facades\Cache;
+ 
+ class DashboardController extends Controller
+ {
+     public function __construct(protected AnalyticsService $analytics) {}
+ 
+-    /**
+-     * GET /api/dashboard-data
+-     * Called every 3 seconds by the dashboard frontend.
+-     */
+     public function index(): JsonResponse
+     {
+-        $settings  = SystemSetting::current()->load('activeStudent');
+-        $latestLog = $settings->is_tracking_on && $settings->active_student_id && $settings->tracking_started_at
+-            ? EnergyLog::where('student_id', $settings->active_student_id)
+-                ->where('logged_at', '>=', $settings->tracking_started_at)
+-                ->orderByDesc('logged_at')
+-                ->first()
+-            : EnergyLog::where('student_id', $settings->active_student_id)
++        $settings      = SystemSetting::current();
++        $activeSession = ChargingSession::whereNull('ended_at')
++            ->latest('started_at')
++            ->first();
++
++        // ── Latest log: prefer session-scoped DB record, fall back to cache ──
++        $latestLog     = null;
++        $latestLogData = null;
++
++        if ($activeSession) {
++            $latestLog = EnergyLog::where('student_email', $activeSession->student_email)
++                ->where('logged_at', '>=', $activeSession->started_at)
+                 ->orderByDesc('logged_at')
+                 ->first();
+-        $analytics = $this->analytics->compute($settings);
+ 
+-        return response()->json([
+-            'tracking_on'    => $settings->is_tracking_on,
+-            'active_student' => $settings->activeStudent
+-                ? [
+-                    'id'         => $settings->activeStudent->id,
+-                    'name'       => $settings->activeStudent->name,
+-                    'student_id' => $settings->activeStudent->student_id,
+-                    'section'    => $settings->activeStudent->section,
+-                    'year_level' => $settings->activeStudent->year_level,
+-                ]
+-                : null,
+-            'latest_log' => $latestLog
+-                ? [
++            if ($latestLog) {
++                $latestLogData = [
+                     'steps'              => $latestLog->steps,
+                     'watts'              => $latestLog->watts,
+                     'voltage'            => $latestLog->voltage,
+                     'battery_percentage' => $latestLog->battery_percentage,
+                     'battery_health'     => $latestLog->battery_health,
+                     'is_charging'        => (bool) $latestLog->is_charging,
+-'charging_source' => $latestLog->charging_source,
++                    'charging_source'    => $latestLog->charging_source,
+                     'logged_at'          => $latestLog->logged_at->toISOString(),
++                    'source'             => 'session',
++                ];
++            }
++        }
++
++        // No session log — use the cached live reading from ESP32 if available
++        if (! $latestLogData) {
++            $cached = Cache::get('esp32_latest');
++            if ($cached) {
++                $latestLogData = array_merge($cached, ['source' => 'live']);
++            }
++        }
++
++        $analytics = $this->analytics->compute($settings, $activeSession);
++
++        return response()->json([
++            'tracking_on'    => $activeSession !== null,
++            'active_student' => $activeSession
++                ? [
++                    'name'          => $activeSession->student_name,
++                    'email'         => $activeSession->student_email,
++                    'started_at'    => $activeSession->started_at->format('h:i A'),
++                    'started_at_ms' => $activeSession->started_at->timestamp * 1000,
+                 ]
+                 : null,
+-            'analytics' => $analytics,
++            'latest_log' => $latestLogData,
++            'analytics'  => $analytics,
+         ]);
+     }
+-}
++}
+\ No newline at end of file
+diff --git a/app/Http/Controllers/Auth/GoogleController.php b/app/Http/Controllers/Auth/GoogleController.php
+new file mode 100644
+index 0000000..67a26cc
+--- /dev/null
++++ b/app/Http/Controllers/Auth/GoogleController.php
+@@ -0,0 +1,141 @@
++<?php
++
++namespace App\Http\Controllers\Auth;
++
++use App\Http\Controllers\Controller;
++use App\Models\ChargingSession;
++use App\Models\SystemSetting;
++use App\Services\MqttService;
++use Illuminate\Http\RedirectResponse;
++use Illuminate\Support\Facades\Http;
++use Illuminate\Support\Facades\Session;
++use Illuminate\View\View;
++
++class GoogleController extends Controller
++{
++    private const ALLOWED_DOMAIN   = 'spcc.edu.ph';
++    private const SESSION_DURATION = 1200; // 20 minutes in seconds
++
++    // ── Show the QR landing page ──────────────────────────────────────
++    public function landing(): View
++    {
++        return view('auth.qr-scan');
++    }
++
++    // ── Redirect to Google OAuth ──────────────────────────────────────
++    public function redirect(): RedirectResponse
++    {
++        $query = http_build_query([
++            'client_id'     => config('services.google.client_id'),
++            'redirect_uri'  => config('services.google.redirect'),
++            'response_type' => 'code',
++            'scope'         => 'openid email profile',
++            'access_type'   => 'online',
++            'prompt'        => 'select_account',
++        ]);
++
++        return redirect('https://accounts.google.com/o/oauth2/v2/auth?' . $query);
++    }
++
++    // ── Handle Google OAuth callback ──────────────────────────────────
++    public function callback(MqttService $mqtt): RedirectResponse
++    {
++        $code = request('code');
++
++        if (! $code) {
++            return redirect()->route('qr.landing')
++                ->with('error', 'Google login was cancelled.');
++        }
++
++        // ── Exchange code for access token ────────────────────────────
++        $tokenResponse = Http::post('https://oauth2.googleapis.com/token', [
++            'code'          => $code,
++            'client_id'     => config('services.google.client_id'),
++            'client_secret' => config('services.google.client_secret'),
++            'redirect_uri'  => config('services.google.redirect'),
++            'grant_type'    => 'authorization_code',
++        ]);
++
++        if ($tokenResponse->failed()) {
++            return redirect()->route('qr.landing')
++                ->with('error', 'Failed to authenticate with Google.');
++        }
++
++        $accessToken = $tokenResponse->json('access_token');
++
++        // ── Fetch user info from Google ───────────────────────────────
++        $userInfo = Http::withToken($accessToken)
++            ->get('https://www.googleapis.com/oauth2/v3/userinfo')
++            ->json();
++
++        $email = $userInfo['email']     ?? null;
++        $name  = $userInfo['name']      ?? 'Unknown';
++
++        if (! $email) {
++            return redirect()->route('qr.landing')
++                ->with('error', 'Could not retrieve your Google account info.');
++        }
++
++        // ── Enforce school domain ─────────────────────────────────────
++        if (! str_ends_with($email, '@' . self::ALLOWED_DOMAIN)) {
++            return redirect()->route('qr.landing')
++                ->with('error', 'Please use your SPCC school email to continue.');
++        }
++
++        // ── Prevent double session (if already active) ────────────────
++        $alreadyActive = ChargingSession::where('student_email', $email)
++            ->whereNull('ended_at')
++            ->exists();
++
++        if ($alreadyActive) {
++            return redirect()->route('qr.landing')
++                ->with('error', 'You already have an active charging session.');
++        }
++
++        // ── Create session record ─────────────────────────────────────
++        $session = ChargingSession::create([
++            'student_name'  => $name,
++            'student_email' => $email,
++            'started_at'    => now(),
++            'ended_at'      => null,
++        ]);
++
++        // ── Update SystemSetting ──────────────────────────────────────
++        $settings = SystemSetting::current();
++        $settings->update([
++            'is_tracking_on'      => true,
++            'active_student_name'  => $name,
++            'active_student_email' => $email,
++            'tracking_started_at'  => now(),
++        ]);
++
++        // ── Signal ESP32 via MQTT ─────────────────────────────────────
++        $mqtt->publish('piezo/command', [
++            'tracking_on'  => true,
++            'student_name' => $name,
++        ], retain: true);
++
++        // ── Store session ID so the stop job can reference it ─────────
++        Session::put('charging_session_id', $session->id);
++
++        // ── Schedule auto-stop after 20 mins ─────────────────────────
++        dispatch(new \App\Jobs\StopChargingSession($session->id))
++            ->delay(now()->addSeconds(self::SESSION_DURATION));
++
++        return redirect()->route('qr.success')
++            ->with([
++                'student_name' => $name,
++                'started_at'   => now()->format('h:i A'),
++            ]);
++    }
++
++    // ── Success page after session starts ────────────────────────────
++public function success(): View
++{
++    $activeSession = ChargingSession::whereNull('ended_at')
++        ->latest('started_at')
++        ->first();
++
++    return view('auth.qr-success', compact('activeSession'));
++}
++}
+\ No newline at end of file
+diff --git a/app/Http/Controllers/DashboardController.php b/app/Http/Controllers/DashboardController.php
+index 93ec846..730824e 100644
+--- a/app/Http/Controllers/DashboardController.php
++++ b/app/Http/Controllers/DashboardController.php
+@@ -5,11 +5,9 @@
+ use App\Models\ChargingSession;
+ use App\Models\EnergyLog;
+ use App\Models\EventLog;
+-use App\Models\Student;
+ use App\Models\SystemSetting;
+ use App\Services\MqttService;
+ use Illuminate\Http\RedirectResponse;
+-use Illuminate\Http\Request;
+ use Illuminate\View\View;
+ 
+ class DashboardController extends Controller
+@@ -18,134 +16,64 @@ public function __construct(protected MqttService $mqtt) {}
+ 
+     public function index(): View
+     {
+-        $settings = SystemSetting::current()->load('activeStudent');
+-        $students = Student::orderBy('name')->get();
++        $settings      = SystemSetting::current();
++        $activeSession = ChargingSession::whereNull('ended_at')
++            ->latest('started_at')
++            ->first();
+ 
+-        return view('dashboard.index', compact('settings', 'students'));
++        return view('dashboard.index', compact('settings', 'activeSession'));
+     }
+ 
+-    public function toggleTracking(Request $request): RedirectResponse
+-    {
+-        $settings = SystemSetting::current()->load('activeStudent');
+-
+-        if ($settings->is_tracking_on) {
+-            // ── Stop tracking ────────────────────────────────────────
+-            $elapsed = $settings->tracking_started_at
+-                ? now()->diffInSeconds($settings->tracking_started_at)
+-                : 0;
+-
+-            if ($settings->active_student_id) {
+-                $session = ChargingSession::where('student_id', $settings->active_student_id)
+-                    ->whereNull('ended_at')
+-                    ->latest('started_at')
+-                    ->first();
+-
+-                if ($session) {
+-                    $firstLog = EnergyLog::where('student_id', $settings->active_student_id)
+-                        ->where('logged_at', '>=', $session->started_at)
+-                        ->orderBy('logged_at')
+-                        ->first();
+-
+-                    $lastLog = EnergyLog::where('student_id', $settings->active_student_id)
+-                        ->where('logged_at', '>=', $session->started_at)
+-                        ->orderByDesc('logged_at')
+-                        ->first();
+-
+-                    $peakWatts = EnergyLog::where('student_id', $settings->active_student_id)
+-                        ->where('logged_at', '>=', $session->started_at)
+-                        ->max('watts') ?? 0;
+-
+-                    $session->update([
+-                        'ended_at'         => now(),
+-                        'duration_seconds' => $elapsed,
+-                        'battery_start'    => $firstLog?->battery_percentage ?? 0,
+-                        'battery_end'      => $lastLog?->battery_percentage ?? 0,
+-                        'capacity_added'   => ($lastLog?->battery_percentage ?? 0) - ($firstLog?->battery_percentage ?? 0),
+-                        'total_steps'      => $lastLog?->steps ?? 0,
+-                        'peak_watts'       => $peakWatts,
+-                        'flagged_overtime' => $elapsed > 1200,
+-                    ]);
+-
+-                    EventLog::record('session_completed', 'Charging session completed.', [
+-                        'student_id'       => $settings->active_student_id,
+-                        'duration_seconds' => $elapsed,
+-                    ]);
+-                }
+-            }
+-
+-            $settings->update([
+-                'is_tracking_on'      => false,
+-                'tracking_started_at' => null,
+-            ]);
+-
+-            $this->mqtt->publish('piezo/command', [
+-                'tracking_on'  => false,
+-                'student_id'   => null,
+-                'student_name' => null,
+-            ], retain: true);
+-
+-            EventLog::record('tracking_stopped', 'Tracking was stopped by admin.', [
+-                'elapsed_seconds' => $elapsed,
+-            ]);
+-
+-            return back()->with('success', 'Tracking stopped and session saved.');
+-
+-        } else {
+-            // ── Start tracking ───────────────────────────────────────
+-            if (! $settings->active_student_id) {
+-                return back()->with('error', 'Please select an active student before starting tracking.');
+-            }
+-
+-            $settings->update([
+-                'is_tracking_on'      => true,
+-                'tracking_started_at' => now(),
+-            ]);
+-
+-            ChargingSession::create([
+-                'student_id' => $settings->active_student_id,
+-                'started_at' => now(),
+-            ]);
+-
+-            $this->mqtt->publish('piezo/command', [
+-                'tracking_on'  => true,
+-                'student_id'   => $settings->activeStudent->student_id,
+-                'student_name' => $settings->activeStudent->name,
+-            ], retain: true);
+-
+-            EventLog::record('tracking_started', 'Tracking was started by admin.', [
+-                'student_id' => $settings->active_student_id,
+-            ]);
+-
+-            return back()->with('success', 'Tracking started.');
+-        }
++public function stopSession(): RedirectResponse
++{
++    $settings      = SystemSetting::current();
++    $activeSession = ChargingSession::whereNull('ended_at')
++        ->latest('started_at')
++        ->first();
++
++    if (! $activeSession) {
++        return back()->with('error', 'No active session to stop.');
+     }
+ 
+-    public function setActiveStudent(Request $request): RedirectResponse
+-    {
+-        $request->validate([
+-            'student_id' => 'required|exists:students,id',
++    try {
++        $elapsed = now()->diffInSeconds($activeSession->started_at);
++
++        $logs        = EnergyLog::where('student_email', $activeSession->student_email)
++            ->where('logged_at', '>=', $activeSession->started_at)
++            ->get();
++
++        $peakWatts   = $logs->max('watts')               ?? 0;
++        $peakVoltage = $logs->max('voltage')              ?? 0;
++        $totalSteps  = $logs->last()?->steps              ?? 0;
++        $batteryEnd  = $logs->last()?->battery_percentage ?? null;
++
++        $activeSession->update([
++            'ended_at'         => now(),
++            'total_steps'      => $totalSteps,
++            'peak_watts'       => $peakWatts,
++            'peak_voltage'     => $peakVoltage,
++            'battery_end'      => $batteryEnd,
++            'flagged_overtime' => $elapsed > 1200,
+         ]);
+ 
+-        $student = Student::findOrFail($request->student_id);
+-
+-        $settings = SystemSetting::current();
+         $settings->update([
+-            'active_student_id' => $student->id,
++            'is_tracking_on'       => false,
++            'active_student_name'  => null,
++            'active_student_email' => null,
++            'tracking_started_at'  => null,
+         ]);
+ 
+-        if ($settings->is_tracking_on) {
+-            $this->mqtt->publish('piezo/command', [
+-                'tracking_on'  => true,
+-                'student_id'   => $student->student_id,
+-                'student_name' => $student->name,
+-            ], retain: true);
+-        }
+-
+-        EventLog::record('student_assigned', "Active student set to {$student->name}.", [
+-            'student_id'   => $student->id,
+-            'student_name' => $student->name,
+-        ]);
++        $this->mqtt->publish('piezo/command', [
++            'tracking_on'  => false,
++            'student_name' => '',
++        ], retain: true);
++
++return back()->with('success', 'Session stopped successfully.');
++
++        return back()->with('success', 'Session stopped successfully.');
+ 
+-        return back()->with('success', "Active student set to {$student->name}.");
++    } catch (\Throwable $e) {
++        dd($e->getMessage(), $e->getTraceAsString());
+     }
+ }
++}
+\ No newline at end of file
+diff --git a/app/Jobs/StopChargingSession.php b/app/Jobs/StopChargingSession.php
+new file mode 100644
+index 0000000..1a7735e
+--- /dev/null
++++ b/app/Jobs/StopChargingSession.php
+@@ -0,0 +1,64 @@
++<?php
++
++namespace App\Jobs;
++
++use App\Models\ChargingSession;
++use App\Models\EnergyLog;
++use App\Models\SystemSetting;
++use App\Services\MqttService;
++use Illuminate\Bus\Queueable;
++use Illuminate\Contracts\Queue\ShouldQueue;
++use Illuminate\Foundation\Bus\Dispatchable;
++use Illuminate\Queue\InteractsWithQueue;
++use Illuminate\Queue\SerializesModels;
++
++class StopChargingSession implements ShouldQueue
++{
++    use Dispatchable, InteractsWithQueue, Queueable, SerializesModels;
++
++    public function __construct(private int $sessionId) {}
++
++    public function handle(MqttService $mqtt): void
++    {
++        $session = ChargingSession::find($this->sessionId);
++
++        // Already stopped manually — do nothing
++        if (! $session || $session->ended_at !== null) {
++            return;
++        }
++
++        // ── Gather final stats from energy logs ───────────────────────
++        $logs = EnergyLog::where('student_email', $session->student_email)
++            ->where('logged_at', '>=', $session->started_at)
++            ->get();
++
++        $peakWatts   = $logs->max('watts')              ?? 0;
++        $peakVoltage = $logs->max('voltage')             ?? 0;
++        $totalSteps  = $logs->max('steps')               ?? 0;
++        $batteryEnd  = $logs->last()?->battery_percentage ?? null;
++
++        // ── Close the session ─────────────────────────────────────────
++        $session->update([
++            'ended_at'         => now(),
++            'total_steps'      => $totalSteps,
++            'peak_watts'       => $peakWatts,
++            'peak_voltage'     => $peakVoltage,
++            'battery_end'      => $batteryEnd,
++            'flagged_overtime' => false,
++        ]);
++
++        // ── Reset SystemSetting ───────────────────────────────────────
++        SystemSetting::current()->update([
++            'is_tracking_on'       => false,
++            'active_student_name'  => null,
++            'active_student_email' => null,
++            'tracking_started_at'  => null,
++        ]);
++
++        // ── Signal ESP32 to stop ──────────────────────────────────────
++        $mqtt->publish('piezo/command', [
++            'tracking_on'  => false,
++            'student_name' => '',
++        ], retain: true);
++    }
++}
+\ No newline at end of file
+diff --git a/app/Models/ChargingSession.php b/app/Models/ChargingSession.php
+index 5948a33..fc87049 100644
+--- a/app/Models/ChargingSession.php
++++ b/app/Models/ChargingSession.php
+@@ -3,20 +3,21 @@
+ namespace App\Models;
+ 
+ use Illuminate\Database\Eloquent\Model;
+-use Illuminate\Database\Eloquent\Relations\BelongsTo;
+ 
+ class ChargingSession extends Model
+ {
++    public $timestamps = false;
++
+     protected $fillable = [
+-        'student_id',
++        'student_name',
++        'student_email',
+         'started_at',
+         'ended_at',
+-        'duration_seconds',
+         'total_steps',
+         'peak_watts',
++        'peak_voltage',
+         'battery_start',
+         'battery_end',
+-        'capacity_added',
+         'flagged_overtime',
+     ];
+ 
+@@ -24,32 +25,33 @@ class ChargingSession extends Model
+         'started_at'       => 'datetime',
+         'ended_at'         => 'datetime',
+         'peak_watts'       => 'float',
++        'peak_voltage'     => 'float',
+         'battery_start'    => 'float',
+         'battery_end'      => 'float',
+-        'capacity_added'   => 'float',
+         'flagged_overtime' => 'boolean',
+-        'duration_seconds' => 'integer',
+         'total_steps'      => 'integer',
+     ];
+ 
+-    public function student(): BelongsTo
++    // ── Is the session still active? ─────────────────────────────────
++    public function isActive(): bool
+     {
+-        return $this->belongsTo(Student::class);
++        return is_null($this->ended_at);
+     }
+ 
+-    /**
+-     * Returns a human-readable duration string e.g. "12m 34s"
+-     */
++    // ── Duration in seconds ───────────────────────────────────────────
++    public function durationSeconds(): int
++    {
++        $end = $this->ended_at ?? now();
++        return (int) $this->started_at->diffInSeconds($end);
++    }
++
++    // ── Human readable duration ───────────────────────────────────────
+     public function durationFormatted(): string
+     {
+-        $seconds = $this->duration_seconds ?? 0;
++        $seconds = $this->durationSeconds();
+         $minutes = intdiv($seconds, 60);
+         $secs    = $seconds % 60;
+ 
+-        if ($minutes > 0) {
+-            return "{$minutes}m {$secs}s";
+-        }
+-
+-        return "{$secs}s";
++        return $minutes > 0 ? "{$minutes}m {$secs}s" : "{$secs}s";
+     }
+-}
++}
+\ No newline at end of file
+diff --git a/app/Models/EnergyLog.php b/app/Models/EnergyLog.php
+index 65f1c86..c930067 100644
+--- a/app/Models/EnergyLog.php
++++ b/app/Models/EnergyLog.php
+@@ -3,20 +3,21 @@
+ namespace App\Models;
+ 
+ use Illuminate\Database\Eloquent\Model;
+-use Illuminate\Database\Eloquent\Relations\BelongsTo;
+ 
+ class EnergyLog extends Model
+ {
+     public $timestamps = false;
+ 
+     protected $fillable = [
+-        'student_id',
++        'student_email',
++        'student_name',
+         'steps',
+         'watts',
+         'voltage',
+         'battery_percentage',
+         'battery_health',
+         'is_charging',
++        'charging_source',
+         'logged_at',
+     ];
+ 
+@@ -28,9 +29,4 @@ class EnergyLog extends Model
+         'steps'              => 'integer',
+         'is_charging'        => 'boolean',
+     ];
+-
+-    public function student(): BelongsTo
+-    {
+-        return $this->belongsTo(Student::class);
+-    }
+-}
++}
+\ No newline at end of file
+diff --git a/app/Models/SystemSetting.php b/app/Models/SystemSetting.php
+index b1adb05..254fda7 100644
+--- a/app/Models/SystemSetting.php
++++ b/app/Models/SystemSetting.php
+@@ -3,13 +3,13 @@
+ namespace App\Models;
+ 
+ use Illuminate\Database\Eloquent\Model;
+-use Illuminate\Database\Eloquent\Relations\BelongsTo;
+ 
+ class SystemSetting extends Model
+ {
+     protected $fillable = [
+-        'active_student_id',
+         'is_tracking_on',
++        'active_student_name',
++        'active_student_email',
+         'tracking_started_at',
+     ];
+ 
+@@ -18,23 +18,16 @@ class SystemSetting extends Model
+         'tracking_started_at' => 'datetime',
+     ];
+ 
+-    public function activeStudent(): BelongsTo
+-    {
+-        return $this->belongsTo(Student::class, 'active_student_id');
+-    }
+-
+-    /**
+-     * Always returns the single singleton row (id = 1).
+-     */
+     public static function current(): static
+     {
+         return static::firstOrCreate(
+             ['id' => 1],
+             [
+-                'active_student_id'  => null,
+-                'is_tracking_on'     => false,
+-                'tracking_started_at'=> null,
++                'is_tracking_on'       => false,
++                'active_student_name'  => null,
++                'active_student_email' => null,
++                'tracking_started_at'  => null,
+             ]
+         );
+     }
+-}
++}
+\ No newline at end of file
+diff --git a/app/Services/AnalyticsService.php b/app/Services/AnalyticsService.php
+index 7c589b6..b8838b4 100644
+--- a/app/Services/AnalyticsService.php
++++ b/app/Services/AnalyticsService.php
+@@ -11,58 +11,83 @@ class AnalyticsService
+      * Compute all analytics for the dashboard poll.
+      * Returns an array with pace, eta, session_elapsed, is_overtime.
+      */
+-    public function compute(SystemSetting $settings): array
+-    {
+-        $elapsed   = null;
+-        $overtime  = false;
++public function compute(SystemSetting $settings, ?\App\Models\ChargingSession $activeSession = null): array
++{
++    // No active session — return a zeroed payload immediately so callers
++    // always get a valid array and the API never 500s.
++    if (! $activeSession) {
++        return $this->emptyAnalytics();
++    }
+ 
+-        if ($settings->is_tracking_on && $settings->tracking_started_at) {
+-            $elapsed  = now()->diffInSeconds($settings->tracking_started_at);
+-            $overtime = $elapsed > 1200; // 20 minutes
+-        }
++    $elapsed  = now()->diffInSeconds($activeSession->started_at);
++    $overtime = $elapsed > 1200;
+ 
+-        $pace = null;
+-        $eta  = null;
++    $pace = null;
++    $eta  = null;
++    $lastKnownPace = null;
+ 
+-if ($settings->is_tracking_on && $settings->active_student_id && $settings->tracking_started_at) {
+-$newer = EnergyLog::where('student_id', $settings->active_student_id)
+-        ->where('logged_at', '>=', $settings->tracking_started_at)
+-        ->orderByDesc('logged_at')
+-        ->first();
++    $settings->active_student_email = $activeSession->student_email;
++    $settings->tracking_started_at  = $activeSession->started_at;
+ 
+-    $older = EnergyLog::where('student_id', $settings->active_student_id)
+-        ->where('logged_at', '>=', $settings->tracking_started_at)
+-        ->orderBy('logged_at')
+-        ->first();
++    if ($activeSession->student_email && $activeSession->started_at) {
+ 
+-    if ($newer && $older && $newer->id !== $older->id) {
+-$batteryDiff  = $newer->battery_percentage - $older->battery_percentage;
+-$voltageDiff  = $newer->voltage - $older->voltage;
+-$timeDiff     = abs($newer->logged_at->diffInSeconds($older->logged_at));
++        $newer = EnergyLog::where('student_email', $settings->active_student_email)
++            ->where('logged_at', '>=', $settings->tracking_started_at)
++            ->orderByDesc('logged_at')
++            ->first();
+ 
+-if ($timeDiff > 0 && ($batteryDiff > 0 || $voltageDiff > 0)) {
+-    if ($batteryDiff > 0) {
+-        $pace = ($timeDiff / 60) / $batteryDiff;
+-    } else {
+-        // Estimate pace from voltage trend (0.95V total range: 3.20–4.15)
+-        $pctPerVolt   = 100 / 0.95;
+-        $pctGainedEst = $voltageDiff * $pctPerVolt;
+-        $pace = $pctGainedEst > 0 ? ($timeDiff / 60) / $pctGainedEst : null;
+-    }
++        $older = EnergyLog::where('student_email', $settings->active_student_email)
++            ->where('logged_at', '>=', $settings->tracking_started_at)
++            ->orderBy('logged_at')
++            ->first();
+ 
+-    if ($pace !== null) {
+-        $remaining = 100 - $newer->battery_percentage;
+-        $eta = $pace * $remaining;
+-    }
+-}
++        if ($newer && $older && $newer->id !== $older->id) {
++            $batteryDiff = $newer->battery_percentage - $older->battery_percentage;
++            $voltageDiff = $newer->voltage - $older->voltage;
++            $timeDiff    = abs($newer->logged_at->diffInSeconds($older->logged_at));
++
++            if ($timeDiff > 0 && ($batteryDiff > 0 || $voltageDiff > 0)) {
++                if ($batteryDiff > 0) {
++                    $pace = ($timeDiff / 60) / $batteryDiff;
++                } else {
++                    $pctPerVolt   = 100 / 0.95;
++                    $pctGainedEst = $voltageDiff * $pctPerVolt;
++                    $pace = $pctGainedEst > 0 ? ($timeDiff / 60) / $pctGainedEst : null;
++                }
++
++                if ($pace !== null) {
++                    $remaining     = 100 - $newer->battery_percentage;
++                    $eta           = $pace * $remaining;
++                    $lastKnownPace = $pace;
++                }
++            }
++
++            // Guard: $newer may be null if no logs exist yet for this session
++            if ($pace === null && $newer && $newer->battery_percentage !== null) {
++                $pace = $lastKnownPace;
++                if ($pace !== null) {
++                    $remaining = 100 - $newer->battery_percentage;
++                    $eta       = $pace * $remaining;
++                }
++            }
++        }
+     }
++
++    return [
++        'charging_pace_min_per_pct' => $pace    !== null ? round($pace, 2)  : null,
++        'eta_to_full_minutes'       => $eta     !== null ? round($eta, 1)   : null,
++        'session_elapsed_seconds'   => $elapsed,
++        'is_overtime'               => $overtime,
++    ];
+ }
+ 
+-        return [
+-            'charging_pace_min_per_pct' => $pace  !== null ? round($pace, 2)  : null,
+-            'eta_to_full_minutes'       => $eta   !== null ? round($eta, 1)   : null,
+-            'session_elapsed_seconds'   => $elapsed,
+-            'is_overtime'               => $overtime,
+-        ];
+-    }
++private function emptyAnalytics(): array
++{
++    return [
++        'charging_pace_min_per_pct' => null,
++        'eta_to_full_minutes'       => null,
++        'session_elapsed_seconds'   => null,
++        'is_overtime'               => false,
++    ];
+ }
++}
+\ No newline at end of file
+diff --git a/config/services.php b/config/services.php
+index 6a90eb8..d01b72b 100644
+--- a/config/services.php
++++ b/config/services.php
+@@ -34,5 +34,10 @@
+             'channel' => env('SLACK_BOT_USER_DEFAULT_CHANNEL'),
+         ],
+     ],
++    'google' => [
++        'client_id'     => env('GOOGLE_CLIENT_ID'),
++        'client_secret' => env('GOOGLE_CLIENT_SECRET'),
++        'redirect'      => env('GOOGLE_REDIRECT_URI'),
++    ],
+ 
+ ];
+diff --git a/database/migrations/2026_04_24_215718_create_charging_sessions_table.php b/database/migrations/2026_04_24_215718_create_charging_sessions_table.php
+new file mode 100644
+index 0000000..ebd230c
+--- /dev/null
++++ b/database/migrations/2026_04_24_215718_create_charging_sessions_table.php
+@@ -0,0 +1,32 @@
++<?php
++
++use Illuminate\Database\Migrations\Migration;
++use Illuminate\Database\Schema\Blueprint;
++use Illuminate\Support\Facades\Schema;
++
++return new class extends Migration
++{
++    public function up(): void
++    {
++        Schema::dropIfExists('charging_sessions');
++
++        Schema::create('charging_sessions', function (Blueprint $table) {
++            $table->id();
++            $table->string('student_name');
++            $table->string('student_email');
++            $table->timestamp('started_at');
++            $table->timestamp('ended_at')->nullable();
++            $table->integer('total_steps')->default(0);
++            $table->float('peak_watts', 8, 4)->default(0);
++            $table->float('peak_voltage', 8, 4)->default(0);
++            $table->float('battery_start', 5, 2)->nullable();
++            $table->float('battery_end', 5, 2)->nullable();
++            $table->boolean('flagged_overtime')->default(false);
++        });
++    }
++
++    public function down(): void
++    {
++        Schema::dropIfExists('charging_sessions');
++    }
++};
+\ No newline at end of file
+diff --git a/database/migrations/2026_04_24_215818_update_system_settings_table.php b/database/migrations/2026_04_24_215818_update_system_settings_table.php
+new file mode 100644
+index 0000000..e82e007
+--- /dev/null
++++ b/database/migrations/2026_04_24_215818_update_system_settings_table.php
+@@ -0,0 +1,32 @@
++<?php
++
++use Illuminate\Database\Migrations\Migration;
++use Illuminate\Database\Schema\Blueprint;
++use Illuminate\Support\Facades\Schema;
++
++return new class extends Migration
++{
++    public function up(): void
++    {
++        Schema::table('system_settings', function (Blueprint $table) {
++            $table->dropForeign(['active_student_id']);
++            $table->dropColumn('active_student_id');
++
++            $table->string('active_student_name')->nullable()->after('id');
++            $table->string('active_student_email')->nullable()->after('active_student_name');
++        });
++    }
++
++    public function down(): void
++    {
++        Schema::table('system_settings', function (Blueprint $table) {
++            $table->dropColumn(['active_student_name', 'active_student_email']);
++
++            $table->foreignId('active_student_id')
++                ->nullable()
++                ->constrained('students')
++                ->nullOnDelete()
++                ->after('id');
++        });
++    }
++};
+\ No newline at end of file
+diff --git a/database/migrations/2026_04_24_220511_add_student_email_name_to_energy_logs_table.php b/database/migrations/2026_04_24_220511_add_student_email_name_to_energy_logs_table.php
+new file mode 100644
+index 0000000..13a3b2e
+--- /dev/null
++++ b/database/migrations/2026_04_24_220511_add_student_email_name_to_energy_logs_table.php
+@@ -0,0 +1,26 @@
++<?php
++
++use Illuminate\Database\Migrations\Migration;
++use Illuminate\Database\Schema\Blueprint;
++use Illuminate\Support\Facades\Schema;
++
++return new class extends Migration
++{
++    public function up(): void
++    {
++        Schema::table('energy_logs', function (Blueprint $table) {
++            $table->string('student_email')->nullable()->after('id');
++            $table->string('student_name')->nullable()->after('student_email');
++            $table->dropForeign(['student_id']);
++            $table->dropColumn('student_id');
++        });
++    }
++
++    public function down(): void
++    {
++        Schema::table('energy_logs', function (Blueprint $table) {
++            $table->dropColumn(['student_email', 'student_name']);
++            $table->foreignId('student_id')->nullable()->constrained()->nullOnDelete()->after('id');
++        });
++    }
++};
+\ No newline at end of file
+diff --git a/resources/views/auth/qr-scan.blade.php b/resources/views/auth/qr-scan.blade.php
+new file mode 100644
+index 0000000..d8f8134
+--- /dev/null
++++ b/resources/views/auth/qr-scan.blade.php
+@@ -0,0 +1,53 @@
++<!DOCTYPE html>
++<html lang="en">
++<head>
++    <meta charset="UTF-8">
++    <meta name="viewport" content="width=device-width, initial-scale=1.0">
++    <title>Piezo Charging — Scan to Start</title>
++    @vite(['resources/css/app.css'])
++</head>
++<body class="bg-gray-950 text-white min-h-screen flex items-center justify-center px-4">
++
++    <div class="w-full max-w-sm text-center space-y-8">
++
++        {{-- Logo / Icon --}}
++        <div class="flex flex-col items-center gap-3">
++            <div class="w-16 h-16 rounded-2xl bg-green-500/10 border border-green-500/30
++                        flex items-center justify-center">
++                <svg class="w-8 h-8 text-green-400" fill="none" stroke="currentColor"
++                     stroke-width="1.8" viewBox="0 0 24 24">
++                    <path stroke-linecap="round" stroke-linejoin="round"
++                          d="M3.75 13.5l10.5-11.25L12 10.5h8.25L9.75 21.75 12 13.5H3.75z"/>
++                </svg>
++            </div>
++            <h1 class="text-2xl font-bold tracking-tight">Piezo Charging</h1>
++            <p class="text-sm text-gray-500">Sign in with your SPCC Google account to begin your 20-minute charging session.</p>
++        </div>
++
++        {{-- Error message --}}
++        @if (session('error'))
++            <div class="px-4 py-3 rounded-xl bg-red-500/10 border border-red-500/30 text-red-400 text-sm">
++                {{ session('error') }}
++            </div>
++        @endif
++
++        {{-- Google Sign In Button --}}
++        <a href="{{ route('google.redirect') }}"
++           class="flex items-center justify-center gap-3 w-full px-5 py-3.5 rounded-xl
++                  bg-white text-gray-900 font-semibold text-sm hover:bg-gray-100
++                  transition shadow-lg">
++            <svg class="w-5 h-5" viewBox="0 0 24 24">
++                <path fill="#4285F4" d="M22.56 12.25c0-.78-.07-1.53-.2-2.25H12v4.26h5.92c-.26 1.37-1.04 2.53-2.21 3.31v2.77h3.57c2.08-1.92 3.28-4.74 3.28-8.09z"/>
++                <path fill="#34A853" d="M12 23c2.97 0 5.46-.98 7.28-2.66l-3.57-2.77c-.98.66-2.23 1.06-3.71 1.06-2.86 0-5.29-1.93-6.16-4.53H2.18v2.84C3.99 20.53 7.7 23 12 23z"/>
++                <path fill="#FBBC05" d="M5.84 14.09c-.22-.66-.35-1.36-.35-2.09s.13-1.43.35-2.09V7.07H2.18C1.43 8.55 1 10.22 1 12s.43 3.45 1.18 4.93l3.66-2.84z"/>
++                <path fill="#EA4335" d="M12 5.38c1.62 0 3.06.56 4.21 1.64l3.15-3.15C17.45 2.09 14.97 1 12 1 7.7 1 3.99 3.47 2.18 7.07l3.66 2.84c.87-2.6 3.3-4.53 6.16-4.53z"/>
++            </svg>
++            Continue with Google
++        </a>
++
++        <p class="text-xs text-gray-600">Only <span class="text-gray-400">@spcc.edu.ph</span> accounts are allowed.</p>
++
++    </div>
++
++</body>
++</html>
+\ No newline at end of file
+diff --git a/resources/views/auth/qr-success.blade.php b/resources/views/auth/qr-success.blade.php
+new file mode 100644
+index 0000000..558fcaa
+--- /dev/null
++++ b/resources/views/auth/qr-success.blade.php
+@@ -0,0 +1,118 @@
++<!DOCTYPE html>
++<html lang="en">
++<head>
++    <meta charset="UTF-8">
++    <meta name="viewport" content="width=device-width, initial-scale=1.0">
++    <title>Piezo Charging — Session Started</title>
++    @vite(['resources/css/app.css'])
++</head>
++<body class="bg-gray-950 text-white min-h-screen flex items-center justify-center px-4">
++
++    <div class="w-full max-w-sm text-center space-y-8">
++
++        {{-- Success Icon --}}
++        <div class="flex flex-col items-center gap-3">
++            <div class="w-16 h-16 rounded-2xl bg-green-500/10 border border-green-500/30
++                        flex items-center justify-center">
++                <svg class="w-8 h-8 text-green-400" fill="none" stroke="currentColor"
++                     stroke-width="1.8" viewBox="0 0 24 24">
++                    <path stroke-linecap="round" stroke-linejoin="round" d="M4.5 12.75l6 6 9-13.5"/>
++                </svg>
++            </div>
++            <h1 class="text-2xl font-bold tracking-tight">Session Started!</h1>
++            <p class="text-sm text-gray-500">
++                Your 20-minute charging session is now running.
++                You can close this page.
++            </p>
++        </div>
++
++        {{-- Session Info --}}
++        @if (session('student_name'))
++        <div class="bg-gray-900 border border-gray-800 rounded-2xl p-5 text-left space-y-3">
++            <div class="flex justify-between text-sm">
++                <span class="text-gray-500">Name</span>
++                <span class="text-white font-medium">{{ session('student_name') }}</span>
++            </div>
++            <div class="flex justify-between text-sm">
++                <span class="text-gray-500">Started</span>
++                <span class="text-white font-medium">{{ session('started_at') }}</span>
++            </div>
++            <div class="flex justify-between text-sm">
++                <span class="text-gray-500">Duration</span>
++                <span class="text-green-400 font-medium">20 minutes</span>
++            </div>
++        </div>
++        @endif
++
++        {{-- Countdown --}}
++        <div class="bg-gray-900 border border-gray-800 rounded-2xl p-5">
++            <p class="text-xs text-gray-500 uppercase tracking-widest mb-2">Time Remaining</p>
++            <p id="countdown" class="font-mono text-4xl font-bold text-green-400">20:00</p>
++            <p class="text-xs text-gray-600 mt-2">Session ends automatically</p>
++        </div>
++
++        <p id="session-status-msg" class="text-xs text-gray-600">You may close this page — your session will continue.</p>
++
++    </div>
++
++<script>
++    const startedAt = {{ $activeSession ? $activeSession->started_at->timestamp * 1000 : 'Date.now()' }};
++    const DURATION  = 20 * 60 * 1000;
++    const el        = document.getElementById('countdown');
++    let   isStopped = false;
++
++    function tick() {
++        if (isStopped) return;
++
++        const remaining = Math.max(0, Math.floor((startedAt + DURATION - Date.now()) / 1000));
++        const m = Math.floor(remaining / 60);
++        const s = remaining % 60;
++        el.textContent = `${String(m).padStart(2,'0')}:${String(s).padStart(2,'0')}`;
++
++        if (remaining <= 60) {
++            el.classList.remove('text-green-400');
++            el.classList.add('text-red-400');
++        }
++
++        if (remaining > 0) setTimeout(tick, 1000);
++        else {
++            el.classList.remove('text-green-400', 'text-red-400');
++            el.classList.add('text-gray-500');
++        }
++    }
++
++    function showStopped(reason) {
++        isStopped = true;
++        el.textContent = '00:00';
++        el.classList.remove('text-green-400', 'text-red-400');
++        el.classList.add('text-gray-500');
++
++        const msg = document.getElementById('session-status-msg');
++        msg.textContent = reason;
++        msg.className   = 'text-sm text-red-400 mt-2';
++    }
++
++    tick();
++
++    document.addEventListener('visibilitychange', () => {
++        if (document.visibilityState === 'visible') tick();
++    });
++
++    // ── Poll every 5s to detect manual stop ──────────────────
++    async function checkIfStopped() {
++        if (isStopped) return;
++        try {
++            const res  = await fetch('/api/dashboard-data');
++            if (! res.ok) return;
++            const data = await res.json();
++            if (! data.tracking_on) {
++                showStopped('Session was stopped by the admin.');
++            }
++        } catch (e) {}
++    }
++
++    setInterval(checkIfStopped, 5000);
++</script>
++
++</body>
++</html>
+\ No newline at end of file
+diff --git a/resources/views/dashboard/index.blade.php b/resources/views/dashboard/index.blade.php
+index 0bce961..0232096 100644
+--- a/resources/views/dashboard/index.blade.php
++++ b/resources/views/dashboard/index.blade.php
+@@ -3,15 +3,19 @@
+ @section('title', 'Dashboard — Piezo')
+ @section('page-title', 'Live Dashboard')
+ 
++@push('head')
++<meta name="csrf-token" content="{{ csrf_token() }}">
++@endpush
++
+ @section('content')
+ <div class="mt-6 space-y-6" id="dashboard-root">
+ 
+-    {{-- ── Row 1: Toggle + Student Picker ──────────────────────────── --}}
++    {{-- ── Row 1: Session Status + Active Student ──────────────────────── --}}
+     <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+ 
+-        {{-- System Toggle --}}
++        {{-- Tracking Status --}}
+         <div class="bg-gray-900 border border-gray-800 rounded-2xl p-6">
+-            <p class="text-xs font-semibold text-gray-500 uppercase tracking-widest mb-4">System Control</p>
++            <p class="text-xs font-semibold text-gray-500 uppercase tracking-widest mb-4">System Status</p>
+             <div class="flex items-center justify-between">
+                 <div>
+                     <p class="text-sm font-medium text-gray-300 mb-1">Tracking Status</p>
+@@ -23,52 +27,38 @@ class="inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-se
+                         {{ $settings->is_tracking_on ? 'TRACKING ON' : 'TRACKING OFF' }}
+                     </span>
+                 </div>
+-                <form method="POST" action="{{ route('dashboard.toggle') }}">
+-                    @csrf
+-                    <button type="submit"
+-                            class="px-5 py-2.5 rounded-xl text-sm font-semibold transition
+-                                   {{ $settings->is_tracking_on
+-                                       ? 'bg-red-500/10 border border-red-500/30 text-red-400 hover:bg-red-500/20'
+-                                       : 'bg-green-500 text-gray-950 hover:bg-green-400' }}">
+-                        {{ $settings->is_tracking_on ? 'Stop Tracking' : 'Start Tracking' }}
+-                    </button>
+-                </form>
++                <div class="text-xs text-gray-600 italic">Auto · QR controlled</div>
+             </div>
+         </div>
+ 
+-        {{-- Active Student Picker --}}
++        {{-- Currently Charging --}}
+         <div class="bg-gray-900 border border-gray-800 rounded-2xl p-6">
+-            <p class="text-xs font-semibold text-gray-500 uppercase tracking-widest mb-4">Active Student</p>
+-            <form method="POST" action="{{ route('dashboard.active-student') }}" class="flex gap-3">
+-                @csrf
+-                <select name="student_id"
+-                        class="flex-1 px-3 py-2.5 rounded-xl bg-gray-800 border border-gray-700 text-white text-sm
+-                               focus:outline-none focus:ring-2 focus:ring-green-500">
+-                    <option value="">— Select student —</option>
+-                    @foreach ($students as $student)
+-                        <option value="{{ $student->id }}"
+-                                {{ $settings->active_student_id == $student->id ? 'selected' : '' }}>
+-                            {{ $student->name }} ({{ $student->student_id }})
+-                        </option>
+-                    @endforeach
+-                </select>
+-                <button type="submit"
+-                        class="px-4 py-2.5 rounded-xl bg-green-500 hover:bg-green-400 text-gray-950
+-                               text-sm font-semibold transition shrink-0">
+-                    Set
+-                </button>
+-            </form>
+-            @if ($settings->activeStudent)
+-                <p class="text-xs text-gray-500 mt-2">
+-                    Current: <span class="text-green-400">{{ $settings->activeStudent->name }}</span>
+-                    — {{ $settings->activeStudent->section }}, {{ $settings->activeStudent->year_level }}
+-                </p>
+-            @endif
++            <p class="text-xs font-semibold text-gray-500 uppercase tracking-widest mb-4">Currently Charging</p>
++            <div id="currently-charging-content">
++                @if ($activeSession)
++                    <p class="text-sm font-semibold text-white">{{ $activeSession->student_name }}</p>
++                    <p class="text-xs text-gray-500 mt-1">{{ $activeSession->student_email }}</p>
++                    <p class="text-xs text-gray-600 mt-1">
++                        Started: <span class="text-gray-400">{{ $activeSession->started_at->format('h:i A') }}</span>
++                    </p>
++                    <form method="POST" action="{{ route('dashboard.stop') }}" class="mt-4">
++                        @csrf
++                        <button type="submit"
++                                onclick="return confirm('Force stop this session?')"
++                                class="px-4 py-2 rounded-xl text-xs font-semibold bg-red-500/10 text-red-400
++                                       border border-red-500/30 hover:bg-red-500/20 transition">
++                            Force Stop Session
++                        </button>
++                    </form>
++                @else
++                    <p class="text-sm text-gray-600 italic">No active session — waiting for QR scan.</p>
++                @endif
++            </div>
+         </div>
+ 
+     </div>
+ 
+-    {{-- ── Row 2: Session Timer + 4 Metric Cards ────────────────────── --}}
++    {{-- ── Row 2: Session Timer + 4 Metric Cards ────────────────────────── --}}
+     <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-4 sm:gap-6">
+ 
+         {{-- Session Timer --}}
+@@ -78,8 +68,8 @@ class="px-4 py-2.5 rounded-xl bg-green-500 hover:bg-green-400 text-gray-950
+                 <p id="session-timer"
+                    class="font-mono text-3xl font-bold text-white tracking-tight">
+                     {{ $settings->is_tracking_on && $settings->tracking_started_at
+-                        ? gmdate('i:s', now()->diffInSeconds($settings->tracking_started_at))
+-                        : '00:00' }}
++                        ? gmdate('i:s', max(0, 1200 - now()->diffInSeconds($settings->tracking_started_at)))
++                        : '20:00' }}
+                 </p>
+                 <p id="overtime-label" class="text-xs mt-1 {{ $settings->is_tracking_on ? 'text-gray-500' : 'text-gray-600' }}">
+                     20:00 limit
+@@ -117,7 +107,7 @@ class="font-mono text-3xl font-bold text-white tracking-tight">
+ 
+     </div>
+ 
+-    {{-- ── Row 3: Battery Gauge + Analytics ─────────────────────────── --}}
++    {{-- ── Row 3: Battery Gauge + Analytics ─────────────────────────────── --}}
+     <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+ 
+         {{-- Battery SVG Arc Gauge --}}
+@@ -125,13 +115,10 @@ class="font-mono text-3xl font-bold text-white tracking-tight">
+             <p class="text-xs font-semibold text-gray-500 uppercase tracking-widest mb-4">Battery Level</p>
+ 
+             <div class="flex flex-col items-center">
+-                {{-- SVG Arc --}}
+                 <svg viewBox="0 0 200 120" class="w-56 h-auto" xmlns="http://www.w3.org/2000/svg">
+-                    {{-- Background arc --}}
+                     <path d="M 20 110 A 80 80 0 0 1 180 110"
+                           fill="none" stroke="#1f2937" stroke-width="16"
+                           stroke-linecap="round"/>
+-                    {{-- Foreground arc --}}
+                     <path id="battery-arc"
+                           d="M 20 110 A 80 80 0 0 1 180 110"
+                           fill="none" stroke="#4ade80" stroke-width="16"
+@@ -139,7 +126,6 @@ class="font-mono text-3xl font-bold text-white tracking-tight">
+                           stroke-dasharray="251.2"
+                           stroke-dashoffset="251.2"
+                           style="transition: stroke-dashoffset 0.8s ease, stroke 0.4s ease"/>
+-                    {{-- Percentage text --}}
+                     <text id="battery-pct-text"
+                           x="100" y="95"
+                           text-anchor="middle"
+@@ -147,8 +133,6 @@ class="font-mono text-3xl font-bold text-white tracking-tight">
+                           font-size="26"
+                           font-weight="bold"
+                           fill="white">—%</text>
+-
+-                    {{-- Charging pulse arc (animates fill → real on step) --}}
+                     <path id="battery-arc-pulse"
+                           d="M 20 110 A 80 80 0 0 1 180 110"
+                           fill="none" stroke="#4ade80" stroke-width="16"
+@@ -159,13 +143,11 @@ class="font-mono text-3xl font-bold text-white tracking-tight">
+                           style="transition: stroke-dashoffset 0.4s ease, opacity 0.3s ease"/>
+                 </svg>
+ 
+-                {{-- Health badge --}}
+                 <span id="battery-health-badge"
+                       class="mt-2 px-3 py-1 rounded-full text-xs font-semibold bg-gray-800 text-gray-400">
+                     No Data
+                 </span>
+ 
+-                {{-- Now Charging badge --}}
+                 <span id="charging-label"
+                       class="mt-2 px-3 py-1 rounded-full text-xs font-semibold
+                              bg-green-500/15 text-green-400 border border-green-500/30
+@@ -174,7 +156,6 @@ class="mt-2 px-3 py-1 rounded-full text-xs font-semibold
+                     <span id="charging-source-label">Now Charging</span>
+                 </span>
+ 
+-                {{-- Battery bar --}}
+                 <div class="w-full mt-4">
+                     <div class="h-2 rounded-full bg-gray-800 overflow-hidden">
+                         <div id="battery-bar"
+@@ -215,7 +196,10 @@ class="h-full rounded-full bg-green-400 transition-all duration-700"
+                         <p class="text-sm text-gray-300 font-medium">Charging For</p>
+                         <p class="text-xs text-gray-600">active student</p>
+                     </div>
+-                    <p id="val-student" class="font-mono text-sm font-bold text-green-400 text-right max-w-32 truncate">—</p>
++                    <div class="text-right max-w-40">
++                        <p id="val-student" class="font-mono text-sm font-bold text-green-400 truncate">—</p>
++                        <p id="val-student-email" class="text-xs text-gray-600 truncate">—</p>
++                    </div>
+                 </div>
+ 
+             </div>
+@@ -230,9 +214,8 @@ class="h-full rounded-full bg-green-400 transition-all duration-700"
+ <script>
+ (function () {
+ 
+-    // ── Tracking state from server (initial page load) ─────────────
+-    let isTracking   = {{ $settings->is_tracking_on ? 'true' : 'false' }};
+-    let startedAt    = {{ $settings->is_tracking_on && $settings->tracking_started_at
++    let isTracking = {{ $settings->is_tracking_on ? 'true' : 'false' }};
++    let startedAt  = {{ $settings->is_tracking_on && $settings->tracking_started_at
+                             ? $settings->tracking_started_at->timestamp * 1000
+                             : 'null' }};
+ 
+@@ -240,9 +223,9 @@ class="h-full rounded-full bg-green-400 transition-all duration-700"
+     const timerEl    = document.getElementById('session-timer');
+     const overtimeEl = document.getElementById('overtime-label');
+ 
+-function updateTimer() {
++    function updateTimer() {
+         if (! isTracking || ! startedAt) {
+-            timerEl.textContent    = '00:00';
++            timerEl.textContent    = '20:00';
+             timerEl.classList.remove('text-red-400');
+             timerEl.classList.add('text-white');
+             overtimeEl.textContent = '20:00 limit';
+@@ -250,9 +233,10 @@ function updateTimer() {
+             return;
+         }
+ 
+-        const elapsed = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+-        const mins    = Math.floor(elapsed / 60);
+-        const secs    = elapsed % 60;
++        const elapsed   = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
++        const remaining = Math.max(0, 1200 - elapsed);
++        const mins      = Math.floor(remaining / 60);
++        const secs      = remaining % 60;
+         timerEl.textContent = `${String(mins).padStart(2,'0')}:${String(secs).padStart(2,'0')}`;
+ 
+         if (elapsed > 1200) {
+@@ -281,39 +265,28 @@ function setChargingSignal(isCharging, currentPct, chargingSource) {
+         const sourceLabel = document.getElementById('charging-source-label');
+ 
+         if (isCharging) {
+-            // Show "Now Charging" label with source
+             sourceLabel.textContent = chargingSource === 'piezo' ? 'Now Charging · Piezoelectric'
+                                     : chargingSource === 'ac'    ? 'Now Charging · AC'
+                                     :                              'Now Charging';
+             label.style.opacity = '1';
++            arc.style.filter    = 'drop-shadow(0 0 8px currentColor)';
+ 
+-            // Glow on main arc
+-            arc.style.filter = 'drop-shadow(0 0 8px currentColor)';
+-
+-            // Pulse arc: slow fill to 100% then fade out
+             const realOffset = 251.2 - (251.2 * currentPct / 100);
+             pulseArc.style.stroke     = arc.style.stroke;
+             pulseArc.style.opacity    = '0.35';
+             pulseArc.style.transition = 'none';
+-
+-            // Start from real percentage
+             pulseArc.style.strokeDashoffset = String(realOffset);
+ 
+             clearTimeout(chargingPulseTimeout);
+             chargingPulseTimeout = setTimeout(() => {
+-                // Slowly fill to 100% over 2.5s
+                 pulseArc.style.transition       = 'stroke-dashoffset 2.5s ease-in-out, opacity 0.5s ease';
+                 pulseArc.style.strokeDashoffset = '0';
+-
+-                // Fade out near the end
+                 chargingPulseTimeout = setTimeout(() => {
+                     pulseArc.style.opacity = '0';
+                 }, 2000);
+-            }, 30); // brief tick so transition fires
++            }, 30);
+ 
+         } else {
+-            // Don't interrupt mid-animation — let it complete and fade out naturally
+-            // Only clear the label and glow after the fill finishes
+             chargingPulseTimeout = setTimeout(() => {
+                 label.style.opacity = '0';
+                 arc.style.filter    = 'none';
+@@ -325,15 +298,14 @@ function setChargingSignal(isCharging, currentPct, chargingSource) {
+     const ARC_LENGTH = 251.2;
+ 
+     function setBattery(pct, health) {
+-        const arc     = document.getElementById('battery-arc');
+-        const text    = document.getElementById('battery-pct-text');
+-        const bar     = document.getElementById('battery-bar');
+-        const badge   = document.getElementById('battery-health-badge');
++        const arc   = document.getElementById('battery-arc');
++        const text  = document.getElementById('battery-pct-text');
++        const bar   = document.getElementById('battery-bar');
++        const badge = document.getElementById('battery-health-badge');
+ 
+-        const offset  = ARC_LENGTH - (ARC_LENGTH * pct / 100);
++        const offset = ARC_LENGTH - (ARC_LENGTH * pct / 100);
+         arc.style.strokeDashoffset = offset;
+ 
+-        // Color by health
+         const colors = {
+             Good:     '#4ade80',
+             Fair:     '#facc15',
+@@ -348,14 +320,52 @@ function setBattery(pct, health) {
+         };
+ 
+         const color = colors[health] ?? '#4ade80';
+-        arc.style.stroke  = color;
+-        bar.style.width   = pct + '%';
++        arc.style.stroke          = color;
++        bar.style.width           = pct + '%';
+         bar.style.backgroundColor = color;
++        text.textContent          = pct.toFixed(1) + '%';
++        badge.textContent         = health ?? 'Unknown';
++        badge.className           = 'mt-2 px-3 py-1 rounded-full text-xs font-semibold '
++                                  + (badgeClasses[health] ?? 'bg-gray-800 text-gray-400');
++    }
+ 
+-        text.textContent  = pct.toFixed(1) + '%';
+-        badge.textContent = health ?? 'Unknown';
+-        badge.className   = 'mt-2 px-3 py-1 rounded-full text-xs font-semibold '
+-                            + (badgeClasses[health] ?? 'bg-gray-800 text-gray-400');
++    // ── Update tracking badge ───────────────────────────────────────
++    function updateTrackingBadge(trackingOn) {
++        const badge = document.getElementById('tracking-badge');
++        if (! badge) return;
++        badge.className = `inline-flex items-center gap-1.5 px-2.5 py-1 rounded-full text-xs font-semibold ${
++            trackingOn ? 'bg-green-500/15 text-green-400' : 'bg-gray-700 text-gray-400'
++        }`;
++        badge.innerHTML = `
++            <span class="w-1.5 h-1.5 rounded-full ${trackingOn ? 'bg-green-400 animate-pulse' : 'bg-gray-500'}"></span>
++            ${trackingOn ? 'TRACKING ON' : 'TRACKING OFF'}
++        `;
++    }
++
++    // ── Update currently charging card ──────────────────────────────
++    function updateChargingCard(activeStudent) {
++        const card = document.getElementById('currently-charging-content');
++        if (! card) return;
++
++        if (activeStudent) {
++            const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
++card.innerHTML = `
++    <p class="text-sm font-semibold text-white">${activeStudent.name}</p>
++    <p class="text-xs text-gray-500 mt-1">${activeStudent.email}</p>
++    <p class="text-xs text-gray-600 mt-1">Started: <span class="text-gray-400">${activeStudent.started_at ?? ''}</span></p>
++    <form method="POST" action="/dashboard/stop" class="mt-4">
++        <input type="hidden" name="_token" value="${csrfToken}">
++        <button type="submit"
++                onclick="return confirm('Force stop this session?')"
++                class="px-4 py-2 rounded-xl text-xs font-semibold bg-red-500/10 text-red-400
++                       border border-red-500/30 hover:bg-red-500/20 transition">
++            Force Stop Session
++        </button>
++    </form>
++`;
++        } else {
++            card.innerHTML = `<p class="text-sm text-gray-600 italic">No active session — waiting for QR scan.</p>`;
++        }
+     }
+ 
+     // ── Dashboard data poller ───────────────────────────────────────
+@@ -365,25 +375,25 @@ function setBattery(pct, health) {
+             if (! res.ok) return;
+             const data = await res.json();
+ 
+-            // Update tracking state for the timer
+             const wasTracking = isTracking;
+             isTracking = data.tracking_on;
+ 
+-            // Only set startedAt once when tracking first begins — never overwrite it mid-session
+-            if (data.tracking_on && !wasTracking && data.analytics?.session_elapsed_seconds != null) {
+-                startedAt = Date.now() - (Math.max(0, data.analytics.session_elapsed_seconds) * 1000);
+-            } else if (data.tracking_on && startedAt === null && data.analytics?.session_elapsed_seconds != null) {
++            // ── Update timer startedAt ────────────────────────────
++            if (data.tracking_on && data.analytics?.session_elapsed_seconds != null) {
+                 startedAt = Date.now() - (Math.max(0, data.analytics.session_elapsed_seconds) * 1000);
+             } else if (! data.tracking_on) {
+                 startedAt = null;
+             }
+ 
+-            // Metric cards
++            // ── Update badge + charging card ──────────────────────
++            updateTrackingBadge(data.tracking_on);
++            updateChargingCard(data.active_student ?? null);
++
+             if (data.latest_log) {
+                 const log = data.latest_log;
+-                document.getElementById('val-steps').textContent   = log.steps.toLocaleString();
+-                document.getElementById('val-watts').textContent   = log.watts.toFixed(4) + ' W';
+-                document.getElementById('val-voltage').textContent = log.voltage.toFixed(3) + ' V';
++document.getElementById('val-steps').textContent   = log.steps != null  ? log.steps.toLocaleString()  : '—';
++document.getElementById('val-watts').textContent   = log.watts != null  ? log.watts.toFixed(4) + ' W' : '—';
++document.getElementById('val-voltage').textContent = log.voltage != null ? log.voltage.toFixed(3) + ' V' : '—';
+ 
+                 const ageSec = Math.floor((Date.now() - new Date(log.logged_at).getTime()) / 1000);
+                 document.getElementById('val-updated').textContent = ageSec + 's';
+@@ -392,17 +402,23 @@ function setBattery(pct, health) {
+                 setChargingSignal(log.is_charging ?? false, log.battery_percentage, log.charging_source ?? null);
+             }
+ 
+-            // Analytics
++            // ── Analytics ─────────────────────────────────────────
+             const a = data.analytics;
+             document.getElementById('val-pace').textContent =
+                 a?.charging_pace_min_per_pct != null ? a.charging_pace_min_per_pct + ' min' : '—';
+-            document.getElementById('val-eta').textContent  =
++            document.getElementById('val-eta').textContent =
+                 a?.eta_to_full_minutes != null ? a.eta_to_full_minutes + ' min' : '—';
+-            document.getElementById('val-student').textContent =
+-                data.active_student?.name ?? '—';
++
++            if (data.active_student) {
++                document.getElementById('val-student').textContent       = data.active_student.name;
++                document.getElementById('val-student-email').textContent = data.active_student.email;
++            } else {
++                document.getElementById('val-student').textContent       = '—';
++                document.getElementById('val-student-email').textContent = '—';
++            }
+ 
+         } catch (e) {
+-            // silent fail — server might be momentarily busy
++            // silent fail
+         }
+     }
+ 
+@@ -411,4 +427,4 @@ function setBattery(pct, health) {
+ 
+ })();
+ </script>
+-@endpush
++@endpush
+\ No newline at end of file
+diff --git a/resources/views/layouts/app.blade.php b/resources/views/layouts/app.blade.php
+index 5bde72c..4549fba 100644
+--- a/resources/views/layouts/app.blade.php
++++ b/resources/views/layouts/app.blade.php
+@@ -63,17 +63,6 @@ class="flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transi
+                 Dashboard
+             </a>
+ 
+-            <a href="{{ route('students.index') }}"
+-               onclick="closeSidebar()"
+-               class="flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition
+-                      {{ request()->routeIs('students.*') ? 'bg-green-500/10 text-green-400 border border-green-500/20' : 'text-gray-400 hover:bg-gray-800 hover:text-white' }}">
+-                <svg class="w-4 h-4 shrink-0" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2"
+-                          d="M12 4.354a4 4 0 110 5.292M15 21H3v-1a6 6 0 0112 0v1zm0 0h6v-1a6 6 0 00-9-5.197M13 7a4 4 0 11-8 0 4 4 0 018 0z" />
+-                </svg>
+-                Students
+-            </a>
+-
+             <a href="{{ route('reports.index') }}"
+                onclick="closeSidebar()"
+                class="flex items-center gap-3 px-3 py-2.5 rounded-xl text-sm font-medium transition
+diff --git a/routes/web.php b/routes/web.php
+index 760d051..fa9be8b 100644
+--- a/routes/web.php
++++ b/routes/web.php
+@@ -1,9 +1,9 @@
+ <?php
+ 
+ use App\Http\Controllers\Auth\LoginController;
++use App\Http\Controllers\Auth\GoogleController;
+ use App\Http\Controllers\DashboardController;
+ use App\Http\Controllers\ReportsController;
+-use App\Http\Controllers\StudentController;
+ use Illuminate\Support\Facades\Route;
+ 
+ // ── Auth routes ───────────────────────────────────────────────────────
+@@ -16,25 +16,32 @@
+     ->middleware('auth')
+     ->name('logout');
+ 
++// ── QR / Google OAuth routes (no auth required) ───────────────────────
++Route::get('/scan',              [GoogleController::class, 'landing'])->name('qr.landing');
++Route::get('/auth/google',       [GoogleController::class, 'redirect'])->name('google.redirect');
++Route::get('/auth/google/callback', [GoogleController::class, 'callback'])->name('google.callback');
++Route::get('/scan/success',      [GoogleController::class, 'success'])->name('qr.success');
++
+ // ── Authenticated routes ──────────────────────────────────────────────
+ Route::middleware('auth')->group(function () {
+ 
++    Route::post('/dashboard/stop', [DashboardController::class, 'stopSession'])->name('dashboard.stop');
++
+     Route::get('/', fn () => redirect()->route('dashboard'));
+ 
+     // Dashboard
+-    Route::get('/dashboard',                 [DashboardController::class, 'index'])->name('dashboard');
+-    Route::post('/dashboard/toggle',         [DashboardController::class, 'toggleTracking'])->name('dashboard.toggle');
+-    Route::post('/dashboard/active-student', [DashboardController::class, 'setActiveStudent'])->name('dashboard.active-student');
++    Route::get('/dashboard', [DashboardController::class, 'index'])->name('dashboard');
+ 
+-    // Students
+-    Route::get('/students',              [StudentController::class, 'index'])->name('students.index');
+-    Route::get('/students/create',       [StudentController::class, 'create'])->name('students.create');
+-    Route::post('/students',             [StudentController::class, 'store'])->name('students.store');
+-    Route::delete('/students/{student}', [StudentController::class, 'destroy'])->name('students.destroy');
+-
+-    // Reports — Phase 6
+-    Route::get('/reports',                [ReportsController::class, 'index'])->name('reports.index');
+-    Route::get('/reports/export/sessions',[ReportsController::class, 'exportSessions'])->name('reports.export.sessions');
+-    Route::get('/reports/export/events',  [ReportsController::class, 'exportEvents'])->name('reports.export.events');
++    // Reports
++    Route::get('/reports',                 [ReportsController::class, 'index'])->name('reports.index');
++    Route::get('/reports/export/sessions', [ReportsController::class, 'exportSessions'])->name('reports.export.sessions');
++    Route::get('/reports/export/events',   [ReportsController::class, 'exportEvents'])->name('reports.export.events');
+ 
+ });
++
++Route::get('/debug-session', function () {
++    return response()->json([
++        'settings' => App\Models\SystemSetting::current()->toArray(),
++        'latest_session' => App\Models\ChargingSession::latest()->first()?->toArray(),
++    ]);
++});
+\ No newline at end of file

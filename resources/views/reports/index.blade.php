@@ -194,20 +194,14 @@
                             @php
                                 $isActive   = is_null($session->ended_at);
                                 $isOvertime = $session->flagged_overtime;
-                                $added      = $session->capacity_added;
+                                $added      = ($session->battery_end ?? 0) - ($session->battery_start ?? 0);
                             @endphp
                             <tr class="hover:bg-gray-800/25 transition-colors duration-100
                                        {{ $isOvertime ? 'border-l-2 border-l-red-500/40' : '' }}">
 
                                 <td class="px-5 py-2.5">
-                                    @if ($session->student)
-                                        <p class="text-sm font-semibold text-white leading-tight">{{ $session->student->name }}</p>
-                                        <p class="text-xs text-gray-500 mt-0.5">
-                                            {{ $session->student->student_id }} &middot; {{ $session->student->section }}
-                                        </p>
-                                    @else
-                                        <span class="text-xs text-gray-600 italic">Deleted student</span>
-                                    @endif
+                                    <p class="text-sm font-semibold text-white leading-tight">{{ $session->student_name }}</p>
+                                        <p class="text-xs text-gray-500 mt-0.5">{{ $session->student_email }}</p>
                                 </td>
 
                                 <td class="px-4 py-2.5 whitespace-nowrap">

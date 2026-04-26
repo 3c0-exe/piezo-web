@@ -16,7 +16,7 @@ public function compute(SystemSetting $settings, ?\App\Models\ChargingSession $a
     // No active session — return a zeroed payload immediately so callers
     // always get a valid array and the API never 500s.
     if (! $activeSession) {
-        return $this->emptyAnalytics();
+        return $this->globalAnalytics();
     }
 
     $elapsed  = now()->diffInSeconds($activeSession->started_at);
@@ -78,6 +78,41 @@ public function compute(SystemSetting $settings, ?\App\Models\ChargingSession $a
         'eta_to_full_minutes'       => $eta     !== null ? round($eta, 1)   : null,
         'session_elapsed_seconds'   => $elapsed,
         'is_overtime'               => $overtime,
+    ];
+}
+
+private function globalAnalytics(): array
+{
+    $latest = \App\Models\EnergyLog::orderByDesc('logged_at')->first();
+    $oldest = \App\Models\EnergyLog::orderBy('logged_at')->first();
+
+    $pace = null;
+    $eta  = null;
+
+    if ($latest && $oldest && $latest->id !== $oldest->id) {
+        $batteryDiff = $latest->battery_percentage - $oldest->battery_percentage;
+        $voltageDiff = $latest->voltage - $oldest->voltage;
+        $timeDiff    = abs($latest->logged_at->diffInSeconds($oldest->logged_at));
+
+        if ($timeDiff > 0 && ($batteryDiff > 0 || $voltageDiff > 0)) {
+            if ($batteryDiff > 0) {
+                $pace = ($timeDiff / 60) / $batteryDiff;
+            } else {
+                $pctGainedEst = $voltageDiff * (100 / 0.95);
+                $pace = $pctGainedEst > 0 ? ($timeDiff / 60) / $pctGainedEst : null;
+            }
+            if ($pace !== null) {
+                $remaining = 100 - $latest->battery_percentage;
+                $eta       = $pace * $remaining;
+            }
+        }
+    }
+
+    return [
+        'charging_pace_min_per_pct' => $pace !== null ? round($pace, 2) : null,
+        'eta_to_full_minutes'       => $eta  !== null ? round($eta, 1)  : null,
+        'session_elapsed_seconds'   => null,
+        'is_overtime'               => false,
     ];
 }
 

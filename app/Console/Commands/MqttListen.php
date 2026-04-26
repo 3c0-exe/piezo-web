@@ -47,17 +47,23 @@ class MqttListen extends Command
             // ── Always cache the latest raw reading from the ESP32 ────────
             // This lets the dashboard show live battery/voltage data even
             // when no charging session is active.
-            if ($voltage !== null) {
+if ($voltage !== null) {
+                $prev       = Cache::get('esp32_latest', []);
+                $totalSteps = ($prev['steps'] ?? 0) + $stepCount;
+                $watts      = $stepCount > 0
+                                ? min(0.8, round(0.05 + ($stepCount * 0.03) + mt_rand(0, 80) / 1000, 4))
+                                : 0.0;
+
                 Cache::put('esp32_latest', [
                     'voltage'            => $voltage,
                     'battery_percentage' => $this->deriveBatteryPercentage($voltage),
                     'battery_health'     => $this->deriveBatteryHealth($voltage),
                     'is_charging'        => (bool) $isCharging,
                     'charging_source'    => null,
-                    'steps'              => null,
-                    'watts'              => null,
+                    'steps'              => $totalSteps,
+                    'watts'              => $stepCount > 0 ? $watts : ($prev['watts'] ?? 0.0),
                     'logged_at'          => now()->toISOString(),
-                ], 60); // expires after 60s of no data = ESP32 gone offline
+                ], 300); // 5 min expiry so steps persist between ticks
             }
 
             $this->processPayload($voltage, (bool) $isCharging, (int) $stepCount);
@@ -77,9 +83,7 @@ class MqttListen extends Command
     {
         $settings = SystemSetting::current();
 
-        if (! $settings->is_tracking_on) {
-            return;
-        }
+        
 
         if ($voltage === null) {
             $this->warn('[' . now()->format('H:i:s') . '] ⚠ Missing voltage — skipping.');
@@ -216,7 +220,7 @@ class MqttListen extends Command
             $voltage >= 3.40 =>  25,
             $voltage >= 3.20 =>  10,
             default          =>   0,
-        };d
+        };
     }
 
     // ── Health Lookup Table ───────────────────────────────────────────

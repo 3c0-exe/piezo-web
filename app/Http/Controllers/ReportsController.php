@@ -24,8 +24,7 @@ class ReportsController extends Controller
         $sessionsPerPage = $this->resolvePerPage('sessions_per_page', self::DEFAULT_SESSIONS_PER_PAGE);
         $eventsPerPage   = $this->resolvePerPage('events_per_page',   self::DEFAULT_EVENTS_PER_PAGE);
 
-        $sessions = ChargingSession::with('student')
-            ->orderByDesc('started_at')
+        $sessions = ChargingSession::orderByDesc('started_at')
             ->paginate($sessionsPerPage, ['*'], 'sessions_page');
 
         $events = EventLog::orderByDesc('occurred_at')
@@ -43,8 +42,7 @@ class ReportsController extends Controller
      */
     public function exportSessions(): StreamedResponse
     {
-        $sessions = ChargingSession::with('student')
-            ->orderByDesc('started_at')
+        $sessions = ChargingSession::orderByDesc('started_at')
             ->get();
 
         $filename = 'charging_sessions_' . now()->format('Ymd_His') . '.csv';
@@ -64,28 +62,25 @@ class ReportsController extends Controller
             fwrite($handle, "\xEF\xBB\xBF");
 
             fputcsv($handle, [
-                'ID', 'Student Name', 'Student ID', 'Section', 'Year Level',
-                'Started At', 'Ended At', 'Duration', 'Duration (seconds)',
-                'Total Steps', 'Peak Watts', 'Battery Start (%)',
-                'Battery End (%)', 'Capacity Added (%)', 'Overtime',
+                'ID', 'Student Name', 'Student Email',
+                'Started At', 'Ended At', 'Duration',
+                'Total Steps', 'Peak Watts', 'Peak Voltage',
+                'Battery Start (%)', 'Battery End (%)', 'Overtime',
             ]);
 
             foreach ($sessions as $s) {
                 fputcsv($handle, [
                     $s->id,
-                    $s->student?->name       ?? 'N/A',
-                    $s->student?->student_id ?? 'N/A',
-                    $s->student?->section    ?? 'N/A',
-                    $s->student?->year_level ?? 'N/A',
+                    $s->student_name,
+                    $s->student_email,
                     $s->started_at?->format('Y-m-d H:i:s') ?? '',
                     $s->ended_at?->format('Y-m-d H:i:s')   ?? '',
                     $s->durationFormatted(),
-                    $s->duration_seconds,
                     $s->total_steps,
                     number_format($s->peak_watts, 4),
-                    number_format($s->battery_start, 2),
-                    number_format($s->battery_end, 2),
-                    number_format($s->capacity_added, 2),
+                    number_format($s->peak_voltage, 4),
+                    number_format($s->battery_start ?? 0, 2),
+                    number_format($s->battery_end   ?? 0, 2),
                     $s->flagged_overtime ? 'Yes' : 'No',
                 ]);
             }

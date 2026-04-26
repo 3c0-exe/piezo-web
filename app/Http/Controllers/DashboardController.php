@@ -70,10 +70,8 @@ public function stopSession(): RedirectResponse
 
 return back()->with('success', 'Session stopped successfully.');
 
-        return back()->with('success', 'Session stopped successfully.');
-
     } catch (\Throwable $e) {
-        dd($e->getMessage(), $e->getTraceAsString());
+        return back()->with('error', 'Failed to stop session: ' . $e->getMessage());
     }
 }
 }

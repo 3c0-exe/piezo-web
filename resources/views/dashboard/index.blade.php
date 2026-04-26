@@ -209,22 +209,23 @@
 
 </div>
 @endsection
-
 @push('scripts')
 <script>
 (function () {
 
-    let isTracking = {{ $settings->is_tracking_on ? 'true' : 'false' }};
-    let startedAt  = {{ $settings->is_tracking_on && $settings->tracking_started_at
-                            ? $settings->tracking_started_at->timestamp * 1000
-                            : 'null' }};
+    // ── Timer state ─────────────────────────────────────────────────
+    // Never initialized from $settings — SystemSetting can be out of sync
+    // with charging_sessions. The first poll (fires immediately) sets these
+    // correctly from the API's started_at_ms field.
+    let isTracking           = false;
+    let anchoredSessionStart = null; // ms timestamp, set once per session, never drifts
 
     // ── Session timer ───────────────────────────────────────────────
     const timerEl    = document.getElementById('session-timer');
     const overtimeEl = document.getElementById('overtime-label');
 
     function updateTimer() {
-        if (! isTracking || ! startedAt) {
+        if (! isTracking || ! anchoredSessionStart) {
             timerEl.textContent    = '20:00';
             timerEl.classList.remove('text-red-400');
             timerEl.classList.add('text-white');
@@ -233,7 +234,7 @@
             return;
         }
 
-        const elapsed   = Math.max(0, Math.floor((Date.now() - startedAt) / 1000));
+        const elapsed   = Math.max(0, Math.floor((Date.now() - anchoredSessionStart) / 1000));
         const remaining = Math.max(0, 1200 - elapsed);
         const mins      = Math.floor(remaining / 60);
         const secs      = remaining % 60;
@@ -254,6 +255,11 @@
 
     setInterval(updateTimer, 1000);
     updateTimer();
+
+    // Instantly correct the timer when user switches back to this tab
+    document.addEventListener('visibilitychange', () => {
+        if (document.visibilityState === 'visible') updateTimer();
+    });
 
     // ── Charging signal ─────────────────────────────────────────────
     let chargingPulseTimeout = null;
@@ -349,20 +355,20 @@
 
         if (activeStudent) {
             const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
-card.innerHTML = `
-    <p class="text-sm font-semibold text-white">${activeStudent.name}</p>
-    <p class="text-xs text-gray-500 mt-1">${activeStudent.email}</p>
-    <p class="text-xs text-gray-600 mt-1">Started: <span class="text-gray-400">${activeStudent.started_at ?? ''}</span></p>
-    <form method="POST" action="/dashboard/stop" class="mt-4">
-        <input type="hidden" name="_token" value="${csrfToken}">
-        <button type="submit"
-                onclick="return confirm('Force stop this session?')"
-                class="px-4 py-2 rounded-xl text-xs font-semibold bg-red-500/10 text-red-400
-                       border border-red-500/30 hover:bg-red-500/20 transition">
-            Force Stop Session
-        </button>
-    </form>
-`;
+            card.innerHTML = `
+                <p class="text-sm font-semibold text-white">${activeStudent.name}</p>
+                <p class="text-xs text-gray-500 mt-1">${activeStudent.email}</p>
+                <p class="text-xs text-gray-600 mt-1">Started: <span class="text-gray-400">${activeStudent.started_at ?? ''}</span></p>
+                <form method="POST" action="/dashboard/stop" class="mt-4">
+                    <input type="hidden" name="_token" value="${csrfToken}">
+                    <button type="submit"
+                            onclick="return confirm('Force stop this session?')"
+                            class="px-4 py-2 rounded-xl text-xs font-semibold bg-red-500/10 text-red-400
+                                   border border-red-500/30 hover:bg-red-500/20 transition">
+                        Force Stop Session
+                    </button>
+                </form>
+            `;
         } else {
             card.innerHTML = `<p class="text-sm text-gray-600 italic">No active session — waiting for QR scan.</p>`;
         }
@@ -375,25 +381,32 @@ card.innerHTML = `
             if (! res.ok) return;
             const data = await res.json();
 
-            const wasTracking = isTracking;
-            isTracking = data.tracking_on;
-
-            // ── Update timer startedAt ────────────────────────────
-            if (data.tracking_on && data.analytics?.session_elapsed_seconds != null) {
-                startedAt = Date.now() - (Math.max(0, data.analytics.session_elapsed_seconds) * 1000);
+            // ── Sync timer anchor from canonical DB timestamp ─────
+            // Use started_at_ms (exact unix ms from charging_sessions).
+            // Only set the anchor once per session — never overwrite with
+            // poll data to avoid drift. Reset to null when session ends.
+            if (data.tracking_on && data.active_student?.started_at_ms) {
+                const serverStart = data.active_student.started_at_ms;
+                if (! anchoredSessionStart || Math.abs(serverStart - anchoredSessionStart) > 3000) {
+                    // New session or anchor not yet set
+                    anchoredSessionStart = serverStart;
+                }
+                isTracking = true;
             } else if (! data.tracking_on) {
-                startedAt = null;
+                isTracking           = false;
+                anchoredSessionStart = null;
             }
 
             // ── Update badge + charging card ──────────────────────
             updateTrackingBadge(data.tracking_on);
             updateChargingCard(data.active_student ?? null);
 
+            // ── Live sensor readings ──────────────────────────────
             if (data.latest_log) {
                 const log = data.latest_log;
-document.getElementById('val-steps').textContent   = log.steps != null  ? log.steps.toLocaleString()  : '—';
-document.getElementById('val-watts').textContent   = log.watts != null  ? log.watts.toFixed(4) + ' W' : '—';
-document.getElementById('val-voltage').textContent = log.voltage != null ? log.voltage.toFixed(3) + ' V' : '—';
+                document.getElementById('val-steps').textContent   = log.steps  != null ? log.steps.toLocaleString()   : '0';
+                document.getElementById('val-watts').textContent   = log.watts  != null ? log.watts.toFixed(4) + ' W'  : '0.0000 W';
+                document.getElementById('val-voltage').textContent = log.voltage != null ? log.voltage.toFixed(3) + ' V' : '—';
 
                 const ageSec = Math.floor((Date.now() - new Date(log.logged_at).getTime()) / 1000);
                 document.getElementById('val-updated').textContent = ageSec + 's';
@@ -418,7 +431,7 @@ document.getElementById('val-voltage').textContent = log.voltage != null ? log.v
             }
 
         } catch (e) {
-            // silent fail
+            // silent fail — network blip, try again next tick
         }
     }
 

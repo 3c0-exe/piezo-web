@@ -1,0 +1,20 @@
+ Dockerfile                                         |   1 +
+ app/Console/Commands/MqttListen.php                | 108 ++++++----
+ app/Http/Controllers/Api/DashboardController.php   |  71 ++++---
+ app/Http/Controllers/Auth/GoogleController.php     | 141 +++++++++++++
+ app/Http/Controllers/DashboardController.php       | 168 +++++-----------
+ app/Jobs/StopChargingSession.php                   |  64 ++++++
+ app/Models/ChargingSession.php                     |  38 ++--
+ app/Models/EnergyLog.php                           |  12 +-
+ app/Models/SystemSetting.php                       |  21 +-
+ app/Services/AnalyticsService.php                  | 113 ++++++-----
+ config/services.php                                |   5 +
+ ...04_24_215718_create_charging_sessions_table.php |  32 +++
+ ...6_04_24_215818_update_system_settings_table.php |  32 +++
+ ...add_student_email_name_to_energy_logs_table.php |  26 +++
+ resources/views/auth/qr-scan.blade.php             |  53 +++++
+ resources/views/auth/qr-success.blade.php          | 118 +++++++++++
+ resources/views/dashboard/index.blade.php          | 220 +++++++++++----------
+ resources/views/layouts/app.blade.php              |  11 --
+ routes/web.php                                     |  35 ++--
+ 19 files changed, 875 insertions(+), 394 deletions(-)
