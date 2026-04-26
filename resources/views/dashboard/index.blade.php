@@ -453,10 +453,13 @@
 
             document.getElementById('val-eta').textContent = formatEta(a?.eta_to_full_minutes ?? null);
 document.getElementById('val-sessions-today').textContent = data.sessions_today ?? '0';
-            // ── Energy harvested: watts × tick interval (3s) in Wh ─
-            const watts     = data.latest_log?.watts ?? 0;
+            // ── Energy harvested: only accumulate when actively charging ─
+            const watts      = data.latest_log?.watts ?? 0;
+            const isCharging = data.latest_log?.is_charging ?? false;
             const prevEnergy = parseFloat(document.getElementById('val-energy').dataset.wh ?? '0');
-            const newEnergy  = prevEnergy + (watts * (3 / 3600));
+            const newEnergy  = (isCharging && watts > 0)
+                                ? prevEnergy + (watts * (3 / 3600))
+                                : prevEnergy;
             document.getElementById('val-energy').dataset.wh  = newEnergy;
             document.getElementById('val-energy').textContent = newEnergy.toFixed(4) + ' Wh';
 
