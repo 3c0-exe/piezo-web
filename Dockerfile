@@ -24,7 +24,7 @@ EXPOSE 8000
 CMD cp /etc/secrets/.env /var/www/.env && \
     chown www-data:www-data /var/www/.env && \
     php artisan config:clear && \
-    php artisan migrate:fresh --force --seed && \
+    php artisan migrate --force && \
     php artisan config:cache && \
     php artisan route:cache && \
     php artisan mqtt:listen & \
