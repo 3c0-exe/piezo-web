@@ -25,7 +25,14 @@ class DashboardController extends Controller
         $latestLog     = null;
         $latestLogData = null;
 
+        $firstSessionLog = null;
+
         if ($activeSession) {
+            $firstSessionLog = EnergyLog::where('student_email', $activeSession->student_email)
+                ->where('logged_at', '>=', $activeSession->started_at)
+                ->orderBy('logged_at')
+                ->first();
+
             $latestLog = EnergyLog::where('student_email', $activeSession->student_email)
                 ->where('logged_at', '>=', $activeSession->started_at)
                 ->orderByDesc('logged_at')
@@ -67,6 +74,7 @@ class DashboardController extends Controller
                     'email'         => $activeSession->student_email,
                     'started_at'    => $activeSession->started_at->format('h:i A'),
                     'started_at_ms' => $activeSession->started_at->timestamp * 1000,
+                    'steps_start'   => $firstSessionLog?->steps ?? null,
                 ]
                 : null,
             'latest_log' => $latestLogData,

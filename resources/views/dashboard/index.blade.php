@@ -414,7 +414,9 @@
             if (data.latest_log) {
                 const log = data.latest_log;
 
-                const stepsTaken  = log.steps != null ? log.steps : 0;
+                const stepsRaw    = log.steps != null ? log.steps : 0;
+                const stepsStart  = data.active_student?.steps_start ?? stepsRaw;
+                const stepsTaken  = Math.max(0, stepsRaw - stepsStart);
                 const pct         = log.battery_percentage ?? 0;
                 const STEPS_PER_PCT = 750;
                 const stepsToFull = pct < 100
