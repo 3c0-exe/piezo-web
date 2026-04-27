@@ -3,11 +3,13 @@
 namespace App\Http\Controllers\Auth;
 
 use App\Http\Controllers\Controller;
+use App\Mail\SessionStarted;
 use App\Models\ChargingSession;
 use App\Models\SystemSetting;
 use App\Services\MqttService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Support\Facades\Http;
+use Illuminate\Support\Facades\Mail;
 use Illuminate\Support\Facades\Session;
 use Illuminate\View\View;
 
@@ -16,13 +18,11 @@ class GoogleController extends Controller
     private const ALLOWED_DOMAIN   = 'spcc.edu.ph';
     private const SESSION_DURATION = 1200; // 20 minutes in seconds
 
-    // ── Show the QR landing page ──────────────────────────────────────
     public function landing(): View
     {
         return view('auth.qr-scan');
     }
 
-    // ── Redirect to Google OAuth ──────────────────────────────────────
     public function redirect(): RedirectResponse
     {
         $query = http_build_query([
@@ -37,7 +37,6 @@ class GoogleController extends Controller
         return redirect('https://accounts.google.com/o/oauth2/v2/auth?' . $query);
     }
 
-    // ── Handle Google OAuth callback ──────────────────────────────────
     public function callback(MqttService $mqtt): RedirectResponse
     {
         $code = request('code');
@@ -47,7 +46,6 @@ class GoogleController extends Controller
                 ->with('error', 'Google login was cancelled.');
         }
 
-        // ── Exchange code for access token ────────────────────────────
         $tokenResponse = Http::post('https://oauth2.googleapis.com/token', [
             'code'          => $code,
             'client_id'     => config('services.google.client_id'),
@@ -63,26 +61,23 @@ class GoogleController extends Controller
 
         $accessToken = $tokenResponse->json('access_token');
 
-        // ── Fetch user info from Google ───────────────────────────────
         $userInfo = Http::withToken($accessToken)
             ->get('https://www.googleapis.com/oauth2/v3/userinfo')
             ->json();
 
-        $email = $userInfo['email']     ?? null;
-        $name  = $userInfo['name']      ?? 'Unknown';
+        $email = $userInfo['email'] ?? null;
+        $name  = $userInfo['name']  ?? 'Unknown';
 
         if (! $email) {
             return redirect()->route('qr.landing')
                 ->with('error', 'Could not retrieve your Google account info.');
         }
 
-        // ── Enforce school domain ─────────────────────────────────────
         if (! str_ends_with($email, '@' . self::ALLOWED_DOMAIN)) {
             return redirect()->route('qr.landing')
                 ->with('error', 'Please use your SPCC school email to continue.');
         }
 
-        // ── Prevent double session (if already active) ────────────────
         $alreadyActive = ChargingSession::where('student_email', $email)
             ->whereNull('ended_at')
             ->exists();
@@ -92,7 +87,6 @@ class GoogleController extends Controller
                 ->with('error', 'You already have an active charging session.');
         }
 
-        // ── Create session record ─────────────────────────────────────
         $session = ChargingSession::create([
             'student_name'  => $name,
             'student_email' => $email,
@@ -100,27 +94,26 @@ class GoogleController extends Controller
             'ended_at'      => null,
         ]);
 
-        // ── Update SystemSetting ──────────────────────────────────────
         $settings = SystemSetting::current();
         $settings->update([
-            'is_tracking_on'      => true,
+            'is_tracking_on'       => true,
             'active_student_name'  => $name,
             'active_student_email' => $email,
             'tracking_started_at'  => now(),
         ]);
 
-        // ── Signal ESP32 via MQTT ─────────────────────────────────────
         $mqtt->publish('piezo/command', [
             'tracking_on'  => true,
             'student_name' => $name,
         ], retain: true);
 
-        // ── Store session ID so the stop job can reference it ─────────
         Session::put('charging_session_id', $session->id);
 
-        // ── Schedule auto-stop after 20 mins ─────────────────────────
         dispatch(new \App\Jobs\StopChargingSession($session->id))
             ->delay(now()->addSeconds(self::SESSION_DURATION));
+
+        // ── Notify student via email ──────────────────────────────────
+        Mail::to($email)->queue(new SessionStarted($session));
 
         return redirect()->route('qr.success')
             ->with([
@@ -129,13 +122,12 @@ class GoogleController extends Controller
             ]);
     }
 
-    // ── Success page after session starts ────────────────────────────
-public function success(): View
-{
-    $activeSession = ChargingSession::whereNull('ended_at')
-        ->latest('started_at')
-        ->first();
+    public function success(): View
+    {
+        $activeSession = ChargingSession::whereNull('ended_at')
+            ->latest('started_at')
+            ->first();
 
-    return view('auth.qr-success', compact('activeSession'));
-}
+        return view('auth.qr-success', compact('activeSession'));
+    }
 }

@@ -2,6 +2,7 @@
 
 namespace App\Jobs;
 
+use App\Mail\SessionStopped;
 use App\Models\ChargingSession;
 use App\Models\EnergyLog;
 use App\Models\SystemSetting;
@@ -11,6 +12,7 @@ use Illuminate\Contracts\Queue\ShouldQueue;
 use Illuminate\Foundation\Bus\Dispatchable;
 use Illuminate\Queue\InteractsWithQueue;
 use Illuminate\Queue\SerializesModels;
+use Illuminate\Support\Facades\Mail;
 
 class StopChargingSession implements ShouldQueue
 {
@@ -22,22 +24,19 @@ class StopChargingSession implements ShouldQueue
     {
         $session = ChargingSession::find($this->sessionId);
 
-        // Already stopped manually — do nothing
         if (! $session || $session->ended_at !== null) {
             return;
         }
 
-        // ── Gather final stats from energy logs ───────────────────────
         $logs = EnergyLog::where('student_email', $session->student_email)
             ->where('logged_at', '>=', $session->started_at)
             ->get();
 
-        $peakWatts   = $logs->max('watts')              ?? 0;
-        $peakVoltage = $logs->max('voltage')             ?? 0;
-        $totalSteps  = $logs->max('steps')               ?? 0;
+        $peakWatts   = $logs->max('watts')               ?? 0;
+        $peakVoltage = $logs->max('voltage')              ?? 0;
+        $totalSteps  = $logs->max('steps')                ?? 0;
         $batteryEnd  = $logs->last()?->battery_percentage ?? null;
 
-        // ── Close the session ─────────────────────────────────────────
         $session->update([
             'ended_at'         => now(),
             'total_steps'      => $totalSteps,
@@ -47,7 +46,6 @@ class StopChargingSession implements ShouldQueue
             'flagged_overtime' => false,
         ]);
 
-        // ── Reset SystemSetting ───────────────────────────────────────
         SystemSetting::current()->update([
             'is_tracking_on'       => false,
             'active_student_name'  => null,
@@ -55,10 +53,12 @@ class StopChargingSession implements ShouldQueue
             'tracking_started_at'  => null,
         ]);
 
-        // ── Signal ESP32 to stop ──────────────────────────────────────
         $mqtt->publish('piezo/command', [
             'tracking_on'  => false,
             'student_name' => '',
         ], retain: true);
+
+        // ── Notify student via email ──────────────────────────────────
+        Mail::to($session->student_email)->queue(new SessionStopped($session));
     }
 }
