@@ -13,16 +13,20 @@ COPY . .
 RUN composer install --no-dev --optimize-autoloader
 RUN npm install && npm run build
 
+RUN chown -R www-data:www-data /var/www/storage /var/www/bootstrap/cache \
+    && chmod -R 775 /var/www/storage /var/www/bootstrap/cache
+
 COPY nginx.conf /etc/nginx/conf.d/default.conf
 RUN rm -f /etc/nginx/sites-enabled/default
 
 EXPOSE 8000
 
 CMD cp /etc/secrets/.env /var/www/.env && \
+    chown www-data:www-data /var/www/.env && \
     php artisan config:clear && \
+    php artisan migrate --force && \
     php artisan config:cache && \
     php artisan route:cache && \
-    php artisan migrate --force && \
     php artisan mqtt:listen & \
     php artisan queue:listen --tries=1 --timeout=0 & \
     (while true; do php artisan schedule:run --verbose --no-interaction; sleep 60; done) & \
