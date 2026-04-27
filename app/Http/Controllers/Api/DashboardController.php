@@ -47,12 +47,11 @@ class DashboardController extends Controller
         }
 
         // No session log — use the cached live reading from ESP32 if available
-        // but override steps with the actual latest DB value (cache steps are unreliable)
+        // Steps come from system_settings.device_total_steps (DB-persisted, survives restarts)
         if (! $latestLogData) {
             $cached = Cache::get('esp32_latest');
             if ($cached) {
-                $lastDbLog = EnergyLog::orderByDesc('logged_at')->first();
-                $cached['steps'] = $lastDbLog?->steps ?? 0;
+                $cached['steps'] = $settings->device_total_steps ?? 0;
                 $latestLogData = array_merge($cached, ['source' => 'live']);
             }
         }

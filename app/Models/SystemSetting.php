@@ -11,11 +11,13 @@ class SystemSetting extends Model
         'active_student_name',
         'active_student_email',
         'tracking_started_at',
+        'device_total_steps',
     ];
 
     protected $casts = [
         'is_tracking_on'      => 'boolean',
         'tracking_started_at' => 'datetime',
+        'device_total_steps'  => 'integer',
     ];
 
     public static function current(): static

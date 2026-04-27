@@ -2,6 +2,7 @@
 
 namespace App\Console\Commands;
 
+use App\Mail\SessionOvertime;
 use App\Models\ChargingSession;
 use App\Models\EnergyLog;
 use App\Models\EventLog;
@@ -9,6 +10,7 @@ use App\Models\SystemSetting;
 use App\Services\MqttService;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Mail;
 
 class MqttListen extends Command
 {
@@ -48,22 +50,27 @@ class MqttListen extends Command
             // This lets the dashboard show live battery/voltage data even
             // when no charging session is active.
 if ($voltage !== null) {
-                $prev       = Cache::get('esp32_latest', []);
-                $totalSteps = ($prev['steps'] ?? 0) + $stepCount;
-                $watts      = $stepCount > 0
+                // ── Persist device lifetime steps to DB (survives restarts) ──
+                if ($stepCount > 0) {
+                    SystemSetting::where('id', 1)->increment('device_total_steps', $stepCount);
+                }
+                $deviceSteps = SystemSetting::current()->device_total_steps;
+
+                $watts = $stepCount > 0
                                 ? min(0.8, round(0.05 + ($stepCount * 0.03) + mt_rand(0, 80) / 1000, 4))
                                 : 0.0;
 
+                $prev = Cache::get('esp32_latest', []);
                 Cache::put('esp32_latest', [
                     'voltage'            => $voltage,
                     'battery_percentage' => $this->deriveBatteryPercentage($voltage),
                     'battery_health'     => $this->deriveBatteryHealth($voltage),
                     'is_charging'        => (bool) $isCharging,
                     'charging_source'    => null,
-                    'steps'              => $totalSteps,
+                    'steps'              => $deviceSteps,
                     'watts'              => $stepCount > 0 ? $watts : ($prev['watts'] ?? 0.0),
                     'logged_at'          => now()->toISOString(),
-                ], 86400); // 24hr — persist last known state indefinitely
+                ], 86400);
             }
 
             $this->processPayload($voltage, (bool) $isCharging, (int) $stepCount);
@@ -193,6 +200,9 @@ if ($voltage !== null) {
 
         if ($elapsedMinutes === 21) {
             $session->update(['flagged_overtime' => true]);
+
+            // ── Notify student once at the 21-minute mark ─────────────
+            Mail::to($session->student_email)->queue(new SessionOvertime($session));
         }
 
         if ($elapsedMinutes > $this->lastOvertimeMinuteLogged) {
