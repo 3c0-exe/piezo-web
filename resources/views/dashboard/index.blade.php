@@ -393,14 +393,10 @@
             if (! res.ok) return;
             const data = await res.json();
 
-            // ── Sync timer anchor from canonical DB timestamp ─────
-            // Use started_at_ms (exact unix ms from charging_sessions).
-            // Only set the anchor once per session — never overwrite with
-            // poll data to avoid drift. Reset to null when session ends.
+            // ── Sync timer anchor ─────────────────────────────────
             if (data.tracking_on && data.active_student?.started_at_ms) {
                 const serverStart = data.active_student.started_at_ms;
                 if (! anchoredSessionStart || Math.abs(serverStart - anchoredSessionStart) > 3000) {
-                    // New session or anchor not yet set
                     anchoredSessionStart = serverStart;
                 }
                 isTracking = true;
@@ -414,21 +410,21 @@
             updateChargingCard(data.active_student ?? null);
 
             // ── Live sensor readings ──────────────────────────────
-            document.getElementById('val-eta').textContent = formatEta(a?.eta_to_full_minutes ?? null);
-            document.getElementById('val-sessions-today').textContent = data.sessions_today ?? '0';
-                const stepsTaken = log.steps != null ? log.steps : 0;
-                // Rough estimate: ~1 step per 0.03W, battery needs ~(100-pct) * someConstant
-                // Simpler: steps taken so far / battery gained * remaining battery
-                const pct = log.battery_percentage ?? 0;
+            // latest_log is set whenever ESP32 is online (session OR just live cache)
+            if (data.latest_log) {
+                const log = data.latest_log;
+
+                const stepsTaken  = log.steps != null ? log.steps : 0;
+                const pct         = log.battery_percentage ?? 0;
                 const STEPS_PER_PCT = 750;
-                const totalNeeded   = Math.round(100 * STEPS_PER_PCT);
-                const stepsToFull   = pct < 100
-                    ? Math.max(0, totalNeeded - stepsTaken)
+                const stepsToFull = pct < 100
+                    ? Math.max(0, Math.round(100 * STEPS_PER_PCT) - stepsTaken)
                     : 0;
-                document.getElementById('val-steps').textContent        = stepsTaken.toLocaleString();
-                document.getElementById('val-steps-to-full').textContent = stepsToFull != null ? stepsToFull.toLocaleString() : '—';
-                document.getElementById('val-watts').textContent   = log.watts  != null ? log.watts.toFixed(4) + ' W'  : '0.0000 W';
-                document.getElementById('val-voltage').textContent = log.voltage != null ? log.voltage.toFixed(3) + ' V' : '—';
+
+                document.getElementById('val-steps').textContent         = stepsTaken.toLocaleString();
+                document.getElementById('val-steps-to-full').textContent = stepsToFull.toLocaleString();
+                document.getElementById('val-watts').textContent         = log.watts   != null ? log.watts.toFixed(4)   + ' W' : '—';
+                document.getElementById('val-voltage').textContent       = log.voltage != null ? log.voltage.toFixed(3) + ' V' : '—';
 
                 const ageSec = Math.floor((Date.now() - new Date(log.logged_at).getTime()) / 1000);
                 document.getElementById('val-updated').textContent = ageSec + 's';
@@ -438,31 +434,33 @@
             }
 
             // ── Analytics ─────────────────────────────────────────
+            // Declare a BEFORE using it
             const a = data.analytics;
-            // ── ETA smart formatting ──────────────────────────────
+
             function formatEta(minutes) {
                 if (minutes == null) return '—';
-                const secs  = minutes * 60;
-                if (secs < 60)                return Math.round(secs) + ' sec';
-                if (minutes < 60)             return Math.round(minutes) + ' min';
-                if (minutes < 1440)           return (minutes / 60).toFixed(1) + ' hrs';
-                if (minutes < 10080)          return (minutes / 1440).toFixed(1) + ' days';
-                if (minutes < 43200)          return (minutes / 10080).toFixed(1) + ' wks';
-                return (minutes / 43200).toFixed(1) + ' mos';
+                const secs = minutes * 60;
+                if (secs < 60)       return Math.round(secs) + ' sec';
+                if (minutes < 60)    return Math.round(minutes) + ' min';
+                if (minutes < 1440)  return (minutes / 60).toFixed(1) + ' hrs';
+                if (minutes < 10080) return (minutes / 1440).toFixed(1) + ' days';
+                return (minutes / 10080).toFixed(1) + ' wks';
             }
 
-            document.getElementById('val-eta').textContent = formatEta(a?.eta_to_full_minutes ?? null);
-document.getElementById('val-sessions-today').textContent = data.sessions_today ?? '0';
-            // ── Energy harvested: only accumulate when actively charging ─
+            document.getElementById('val-eta').textContent           = formatEta(a?.eta_to_full_minutes ?? null);
+            document.getElementById('val-sessions-today').textContent = data.sessions_today ?? '0';
+
+            // ── Energy harvested ──────────────────────────────────
             const watts      = data.latest_log?.watts ?? 0;
             const isCharging = data.latest_log?.is_charging ?? false;
             const prevEnergy = parseFloat(document.getElementById('val-energy').dataset.wh ?? '0');
             const newEnergy  = (isCharging && watts > 0)
-                                ? prevEnergy + (watts * (3 / 3600))
-                                : prevEnergy;
+                ? prevEnergy + (watts * (3 / 3600))
+                : prevEnergy;
             document.getElementById('val-energy').dataset.wh  = newEnergy;
             document.getElementById('val-energy').textContent = newEnergy.toFixed(4) + ' Wh';
 
+            // ── Active student analytics labels ───────────────────
             if (data.active_student) {
                 document.getElementById('val-student').textContent       = data.active_student.name;
                 document.getElementById('val-student-email').textContent = data.active_student.email;
@@ -472,7 +470,7 @@ document.getElementById('val-sessions-today').textContent = data.sessions_today 
             }
 
         } catch (e) {
-            // silent fail — network blip, try again next tick
+            // silent — network blip, retry next tick
         }
     }
 
