@@ -17,6 +17,7 @@ RUN chown -R www-data:www-data /var/www/storage /var/www/bootstrap/cache \
     && chmod -R 775 /var/www/storage /var/www/bootstrap/cache
 
 COPY nginx.conf /etc/nginx/conf.d/default.conf
+COPY fpm-pool.conf /usr/local/etc/php-fpm.d/www.conf
 RUN rm -f /etc/nginx/sites-enabled/default
 
 EXPOSE 8000
