@@ -27,7 +27,7 @@ CMD cp /etc/secrets/.env /var/www/.env && \
     php artisan migrate --force && \
     php artisan config:cache && \
     php artisan route:cache && \
-    php artisan mqtt:listen & \
+    (while true; do php artisan mqtt:listen; echo "MQTT listener crashed, restarting in 3s..."; sleep 3; done) & \
     php artisan queue:listen --tries=1 --timeout=0 & \
     (while true; do php artisan schedule:run --verbose --no-interaction; sleep 60; done) & \
     php-fpm -D && \
