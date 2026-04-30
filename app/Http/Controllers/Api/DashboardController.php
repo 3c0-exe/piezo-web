@@ -60,9 +60,28 @@ class DashboardController extends Controller
 
         $sessionsToday = \App\Models\ChargingSession::whereDate('started_at', today())->count();
 
+        // ── Voltage delta for active session ──────────────────────────
+        $voltageDelta = null;
+        if ($activeSession) {
+            $firstLog = EnergyLog::where('student_email', $activeSession->student_email)
+                ->where('logged_at', '>=', $activeSession->started_at)
+                ->orderBy('logged_at')
+                ->value('voltage');
+
+            $lastLog2 = EnergyLog::where('student_email', $activeSession->student_email)
+                ->where('logged_at', '>=', $activeSession->started_at)
+                ->orderByDesc('logged_at')
+                ->value('voltage');
+
+            if ($firstLog !== null && $lastLog2 !== null) {
+                $voltageDelta = round($firstLog - $lastLog2, 4); // positive = voltage consumed
+            }
+        }
+
         return response()->json([
             'tracking_on'    => $activeSession !== null,
             'sessions_today' => $sessionsToday,
+            'voltage_delta'  => $voltageDelta,
             'active_student' => $activeSession
                 ? [
                     'name'          => $activeSession->student_name,

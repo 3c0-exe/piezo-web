@@ -59,7 +59,7 @@
     </div>
 
     {{-- ── Row 2: Session Timer + 4 Metric Cards ────────────────────────── --}}
-    <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-4 sm:gap-6">
+    <div class="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-6 gap-4 sm:gap-6">
 
         {{-- Session Timer --}}
         <div class="col-span-2 sm:col-span-1 md:col-span-1 bg-gray-900 border border-gray-800 rounded-2xl p-6 flex flex-col justify-between">
@@ -92,6 +92,13 @@
             <p class="text-xs font-semibold text-gray-500 uppercase tracking-widest mb-2">Power</p>
             <p id="val-watts" class="font-mono text-2xl font-bold text-white">—</p>
             <p class="text-xs text-gray-600 mt-1">watts output</p>
+        </div>
+
+        {{-- Voltage Delta --}}
+        <div class="bg-gray-900 border border-gray-800 rounded-2xl p-6">
+            <p class="text-xs font-semibold text-gray-500 uppercase tracking-widest mb-2">Voltage Used</p>
+            <p id="val-voltage-delta" class="font-mono text-2xl font-bold text-white">—</p>
+            <p class="text-xs text-gray-600 mt-1">volts consumed this session</p>
         </div>
 
         {{-- Voltage --}}
@@ -425,6 +432,17 @@
                 document.getElementById('val-steps-to-full').textContent = stepsToFull.toLocaleString();
                 document.getElementById('val-watts').textContent         = log.watts   != null ? log.watts.toFixed(4)   + ' W' : '—';
                 document.getElementById('val-voltage').textContent       = log.voltage != null ? log.voltage.toFixed(3) + ' V' : '—';
+
+                const delta = data.voltage_delta;
+                const deltaEl = document.getElementById('val-voltage-delta');
+                if (delta !== null && delta !== undefined) {
+                    const sign = delta >= 0 ? '+' : '';
+                    deltaEl.textContent = sign + delta.toFixed(4) + ' V';
+                    deltaEl.className = 'font-mono text-2xl font-bold ' + (delta >= 0 ? 'text-green-400' : 'text-red-400');
+                } else {
+                    deltaEl.textContent = '—';
+                    deltaEl.className = 'font-mono text-2xl font-bold text-white';
+                }
 
                 const ageSec = Math.floor((Date.now() - new Date(log.logged_at).getTime()) / 1000);
                 document.getElementById('val-updated').textContent = ageSec + 's';
