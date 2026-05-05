@@ -2,7 +2,6 @@
 
 namespace App\Console\Commands;
 
-use App\Mail\SessionOvertime;
 use App\Models\ChargingSession;
 use App\Models\EnergyLog;
 use App\Models\EventLog;
@@ -10,12 +9,21 @@ use App\Models\SystemSetting;
 use App\Services\MqttService;
 use Illuminate\Console\Command;
 use Illuminate\Support\Facades\Cache;
-use Illuminate\Support\Facades\Mail;
 
 class MqttListen extends Command
 {
     protected $signature   = 'mqtt:listen';
     protected $description = 'Subscribe to piezo/data and process incoming ESP32 payloads';
+
+    // ── Flat-voltage detection state ──────────────────────────────────
+    private array  $recentVoltages    = [];   // [ ['voltage' => float, 'time' => Carbon], ... ]
+    private const  FLAT_WINDOW        = 120;  // seconds — 2-minute buffer
+    private const  FLAT_THRESHOLD     = 0.01; // V — minimum drop to count as "charging"
+
+    // ── Other in-memory state ─────────────────────────────────────────
+    private int    $nonChargingTick          = 0;
+    private bool   $lastWasCharging          = false;
+    private ?string $currentChargingSource   = null;
 
     public function handle(MqttService $mqtt): int
     {
@@ -30,7 +38,7 @@ class MqttListen extends Command
             $payload = json_decode($raw, true);
 
             if (! is_array($payload)) {
-                $this->warn('[' . now()->format('H:i:s') . '] ⚠ Invalid JSON received — skipping.');
+                $this->warn('[' . now()->format('H:i:s') . '] ⚠ Invalid JSON — skipping.');
                 return;
             }
 
@@ -41,24 +49,21 @@ class MqttListen extends Command
             $this->line(sprintf(
                 '[%s] voltage=%.3f | is_charging=%s | steps=%d',
                 now()->format('H:i:s'),
-                $voltage,
+                $voltage ?? 0,
                 $isCharging ? 'true' : 'false',
                 $stepCount
             ));
 
-            // ── Always cache the latest raw reading from the ESP32 ────────
-            // This lets the dashboard show live battery/voltage data even
-            // when no charging session is active.
-if ($voltage !== null) {
-                // ── Persist device lifetime steps to DB (survives restarts) ──
+            // ── Always cache latest reading for dashboard ─────────────
+            if ($voltage !== null) {
                 if ($stepCount > 0) {
                     SystemSetting::where('id', 1)->increment('device_total_steps', $stepCount);
                 }
                 $deviceSteps = SystemSetting::current()->device_total_steps;
 
                 $watts = $stepCount > 0
-                                ? min(0.8, round(0.05 + ($stepCount * 0.03) + mt_rand(0, 80) / 1000, 4))
-                                : 0.0;
+                    ? min(0.8, round(0.05 + ($stepCount * 0.03) + mt_rand(0, 80) / 1000, 4))
+                    : 0.0;
 
                 $prev = Cache::get('esp32_latest', []);
                 Cache::put('esp32_latest', [
@@ -79,26 +84,32 @@ if ($voltage !== null) {
         return 0;
     }
 
-    // ── State ─────────────────────────────────────────────────────────
-    private int  $nonChargingTick          = 0;
-    private int  $lastOvertimeMinuteLogged = 0;
-    private bool $lastWasCharging          = false;
-    private ?string $currentChargingSource = null;
-
     // ── Payload Processor ─────────────────────────────────────────────
     private function processPayload(?float $voltage, bool $isCharging, int $stepCount): void
     {
-        $settings = SystemSetting::current();
-
-        
-
         if ($voltage === null) {
             $this->warn('[' . now()->format('H:i:s') . '] ⚠ Missing voltage — skipping.');
             return;
         }
 
-        $studentEmail      = $settings->active_student_email;
-        $studentName       = $settings->active_student_name;
+        $settings = SystemSetting::current();
+
+        $studentEmail = $settings->active_student_email;
+        $studentName  = $settings->active_student_name;
+
+        // ── Recover from orphaned open session if settings were cleared ─
+        if (! $studentEmail) {
+            $orphan = ChargingSession::whereNull('ended_at')->latest('started_at')->first();
+            if ($orphan) {
+                $studentEmail = $orphan->student_email;
+                $studentName  = $orphan->student_name;
+                $this->warn('[' . now()->format('H:i:s') . '] ⚠ Recovered student from open session.');
+            } else {
+                $this->warn('[' . now()->format('H:i:s') . '] ⚠ No active student — skipping.');
+                return;
+            }
+        }
+
         $batteryPercentage = $this->deriveBatteryPercentage($voltage);
         $batteryHealth     = $this->deriveBatteryHealth($voltage);
 
@@ -109,13 +120,30 @@ if ($voltage !== null) {
             ->first();
 
         if (! $session) {
-            $this->warn('[' . now()->format('H:i:s') . '] ⚠ No active session found — skipping.');
+            $this->warn('[' . now()->format('H:i:s') . '] ⚠ No active session — skipping.');
             return;
         }
 
         // ── Set battery_start on first log ────────────────────────────
         if ($session->battery_start === null) {
             $session->update(['battery_start' => $batteryPercentage]);
+        }
+
+        // ── Track voltage for flat detection ──────────────────────────
+        $this->recentVoltages[] = ['voltage' => $voltage, 'time' => now()];
+
+        // Trim entries older than the flat window
+        $cutoff = now()->subSeconds(self::FLAT_WINDOW);
+        $this->recentVoltages = array_filter(
+            $this->recentVoltages,
+            fn($r) => $r['time']->gte($cutoff)
+        );
+        $this->recentVoltages = array_values($this->recentVoltages);
+
+        // ── Check if voltage has been flat for 2 minutes ──────────────
+        if ($this->isVoltageFlatForWindow()) {
+            $this->pauseSession($session, $settings, $studentEmail);
+            return;
         }
 
         $lastLog      = EnergyLog::where('student_email', $studentEmail)
@@ -149,20 +177,18 @@ if ($voltage !== null) {
                 'logged_at'          => now(),
             ]);
 
-            // ── Update peak watts on session ──────────────────────────
             if ($watts > ($session->peak_watts ?? 0)) {
                 $session->update(['peak_watts' => $watts]);
             }
 
-            $this->checkOvertime($settings, $session);
             $this->lastWasCharging = true;
 
         } else {
             // ── Non-charging tick ─────────────────────────────────────
             $this->nonChargingTick++;
 
-            $wasCharging = $this->lastWasCharging;
-            $this->lastWasCharging       = false;
+            $wasCharging           = $this->lastWasCharging;
+            $this->lastWasCharging = false;
             $this->currentChargingSource = null;
 
             if (! $wasCharging && $this->nonChargingTick % 16 !== 1) {
@@ -184,41 +210,79 @@ if ($voltage !== null) {
         }
     }
 
-    // ── Overtime Check ────────────────────────────────────────────────
-    private function checkOvertime(SystemSetting $settings, ChargingSession $session): void
+    // ── Flat Voltage Detection ────────────────────────────────────────
+    private function isVoltageFlatForWindow(): bool
     {
-        if (! $settings->tracking_started_at) {
-            return;
+        // Need at least 2 readings to compare
+        if (count($this->recentVoltages) < 2) {
+            return false;
         }
 
-        $elapsed        = now()->diffInSeconds($settings->tracking_started_at);
-        $elapsedMinutes = (int) floor($elapsed / 60);
-
-        if ($elapsed <= 1200) {
-            return;
+        // The oldest reading in the window must be >= FLAT_WINDOW seconds ago
+        $oldest = $this->recentVoltages[0]['time'];
+        if (now()->diffInSeconds($oldest) < self::FLAT_WINDOW) {
+            return false; // haven't accumulated a full 2-minute window yet
         }
 
-        if ($elapsedMinutes === 21) {
-            $session->update(['flagged_overtime' => true]);
-
-            // ── Notify student once at the 21-minute mark ─────────────
-            Mail::to($session->student_email)->queue(new SessionOvertime($session));
+        // Check every consecutive pair — any drop > threshold means not flat
+        for ($i = 1; $i < count($this->recentVoltages); $i++) {
+            $drop = $this->recentVoltages[$i - 1]['voltage'] - $this->recentVoltages[$i]['voltage'];
+            if ($drop > self::FLAT_THRESHOLD) {
+                return false;
+            }
         }
 
-        if ($elapsedMinutes > $this->lastOvertimeMinuteLogged) {
-            $this->lastOvertimeMinuteLogged = $elapsedMinutes;
-
-            EventLog::record(
-                'session_overtime',
-                "Session is overtime at {$elapsedMinutes} minutes.",
-                ['elapsed_seconds' => $elapsed, 'student_email' => $session->student_email]
-            );
-
-            $this->warn('[' . now()->format('H:i:s') . "] ⚠ OVERTIME — {$elapsedMinutes} min elapsed.");
-        }
+        return true;
     }
 
-    // ── Voltage Lookup Table ──────────────────────────────────────────
+    // ── Pause Session ─────────────────────────────────────────────────
+    private function pauseSession(ChargingSession $session, SystemSetting $settings, string $studentEmail): void
+    {
+        $elapsed   = now()->diffInSeconds($session->started_at);
+        $timeLimit = $session->time_limit ?? 1200;
+        $remaining = max(0, $timeLimit - $elapsed);
+
+        $this->warn('[' . now()->format('H:i:s') . "] ⚠ Voltage flat for 2 minutes — pausing session. Remaining: {$remaining}s");
+
+        // ── Save remaining time to cache for 24 hours ─────────────────
+        Cache::put("piezo_remaining_{$studentEmail}", (int) $remaining, now()->addHours(24));
+
+        // ── Finalize session in DB ────────────────────────────────────
+        $logs        = EnergyLog::where('student_email', $studentEmail)
+            ->where('logged_at', '>=', $session->started_at)
+            ->get();
+
+        $session->update([
+            'ended_at'     => now(),
+            'total_steps'  => $logs->last()?->steps ?? 0,
+            'peak_watts'   => $logs->max('watts')   ?? 0,
+            'peak_voltage' => $logs->max('voltage')  ?? 0,
+            'battery_end'  => $logs->last()?->battery_percentage ?? null,
+            'pause_reason' => 'voltage_flat',
+        ]);
+
+        // ── Clear tracking state ──────────────────────────────────────
+        $settings->update([
+            'is_tracking_on'       => false,
+            'active_student_name'  => null,
+            'active_student_email' => null,
+            'tracking_started_at'  => null,
+        ]);
+
+        // ── Reset in-memory state ─────────────────────────────────────
+        $this->recentVoltages  = [];
+        $this->lastWasCharging = false;
+        $this->currentChargingSource = null;
+        $this->nonChargingTick = 0;
+
+        EventLog::record(
+            'session_paused',
+            "Session paused due to flat voltage. Remaining: {$remaining}s",
+            ['student_email' => $studentEmail, 'remaining_seconds' => $remaining]
+        );
+    }
+
+    // ── Voltage Lookup Tables ─────────────────────────────────────────
     private function deriveBatteryPercentage(float $voltage): int
     {
         return match(true) {
@@ -233,7 +297,6 @@ if ($voltage !== null) {
         };
     }
 
-    // ── Health Lookup Table ───────────────────────────────────────────
     private function deriveBatteryHealth(float $voltage): string
     {
         return match(true) {

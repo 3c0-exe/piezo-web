@@ -11,6 +11,7 @@ use App\Services\MqttService;
 use Illuminate\Http\RedirectResponse;
 use Illuminate\Support\Facades\Mail;
 use Illuminate\View\View;
+use Illuminate\Support\Facades\Cache;   
 
 class DashboardController extends Controller
 {
@@ -64,6 +65,9 @@ class DashboardController extends Controller
                 'active_student_email' => null,
                 'tracking_started_at'  => null,
             ]);
+
+            // Clear any paused session cache so student starts fresh after manual stop
+                Cache::forget("piezo_remaining_{$activeSession->student_email}");
 
             $this->mqtt->publish('piezo/command', [
                 'tracking_on'  => false,
